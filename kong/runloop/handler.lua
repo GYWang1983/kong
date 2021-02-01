@@ -43,6 +43,7 @@ local NOOP = function() end
 
 local ERR   = ngx.ERR
 local CRIT  = ngx.CRIT
+local NOTICE = ngx.NOTICE
 local WARN  = ngx.WARN
 local DEBUG = ngx.DEBUG
 local COMMA = byte(",")
@@ -434,6 +435,11 @@ local function register_events()
 
   if db.strategy == "off" then
     worker_events.register(function(default_ws)
+      if ngx.worker.exiting() then
+        log(NOTICE, "declarative flip config canceled: process exiting")
+        return true
+      end
+
       local ok, err = concurrency.with_coroutine_mutex(FLIP_CONFIG_OPTS, function()
         balancer.stop_healthcheckers()
 
@@ -668,8 +674,8 @@ do
     end
 
     local counter = 0
-    local page_size = db.routes.pagination.page_size
-    for route, err in db.routes:each(nil, GLOBAL_QUERY_OPTS) do
+    local page_size = db.routes.pagination.max_page_size
+    for route, err in db.routes:each(page_size, GLOBAL_QUERY_OPTS) do
       if err then
         return nil, "could not load routes: " .. err
       end
@@ -1046,13 +1052,13 @@ return {
 
       local router = get_updated_router()
 
-      local match_t = router.exec()
+      local match_t = router.exec(ctx)
       if not match_t then
         log(ERR, "no Route found with those values")
         return exit(500)
       end
 
-      ngx.ctx.workspace = match_t.route and match_t.route.ws_id
+      ctx.workspace = match_t.route and match_t.route.ws_id
 
       local route = match_t.route
       local service = match_t.service
@@ -1080,7 +1086,8 @@ return {
   },
   rewrite = {
     before = function(ctx)
-      ctx.host_port = HOST_PORTS[var.server_port] or var.server_port
+      local server_port = var.server_port
+      ctx.host_port = HOST_PORTS[server_port] or server_port
 
       -- special handling for proxy-authorization and te headers in case
       -- the plugin(s) want to specify them (store the original)
@@ -1106,7 +1113,7 @@ return {
         return kong.response.exit(404, { message = "no Route matched with those values" })
       end
 
-      ngx.ctx.workspace = match_t.route and match_t.route.ws_id
+      ctx.workspace = match_t.route and match_t.route.ws_id
 
       local http_version   = ngx.req.http_version()
       local scheme         = var.scheme
@@ -1256,12 +1263,8 @@ return {
       -- executed; detect requests that need to be redirected from `proxy_pass`
       -- to `grpc_pass`. After redirection, this function will return early
       if service and var.kong_proxy_mode == "http" then
-        if service.protocol == "grpc" then
+        if service.protocol == "grpc" or service.protocol == "grpcs" then
           return ngx.exec("@grpc")
-        end
-
-        if service.protocol == "grpcs" then
-          return ngx.exec("@grpcs")
         end
 
         if http_version == 1.1 then
