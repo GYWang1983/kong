@@ -161,6 +161,14 @@ server {
         proxy_pass            $upstream_scheme://kong_upstream$upstream_uri;
     }
 
+> if static_url_path then
+    location ${{STATIC_URL_PATH}} {
+        root ${{STATIC_FILE_PATH}};
+        index index.htm index.html;
+        #return 200 'Hello';
+    }
+> end
+
     location @unbuffered {
         internal;
         default_type         '';

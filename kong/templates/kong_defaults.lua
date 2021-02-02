@@ -158,4 +158,7 @@ lua_package_cpath = NONE
 
 role = traditional
 kic = off
+
+static_url_path =
+static_file_path = /kong/static
 ]]
