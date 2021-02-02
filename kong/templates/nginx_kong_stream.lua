@@ -96,10 +96,8 @@ server {
 > end
 
 > if stream_proxy_ssl_enabled then
-> for i = 1, #ssl_cert do
-    ssl_certificate     $(ssl_cert[i]);
-    ssl_certificate_key $(ssl_cert_key[i]);
-> end
+    ssl_certificate     ${{SSL_CERT}};
+    ssl_certificate_key ${{SSL_CERT_KEY}};
     ssl_session_cache   shared:StreamSSL:10m;
     ssl_certificate_by_lua_block {
         Kong.ssl_certificate()
@@ -134,14 +132,5 @@ server {
     }
 }
 > end -- database == "off"
-
-server {        # ignore (and close }, to ignore content)
-    listen unix:${{PREFIX}}/stream_rpc.sock udp;
-    error_log  ${{ADMIN_ERROR_LOG}} ${{LOG_LEVEL}};
-    content_by_lua_block {
-        Kong.stream_api()
-    }
-}
-
 > end -- #stream_listeners > 0
 ]]
