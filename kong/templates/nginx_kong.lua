@@ -74,6 +74,9 @@ server {
     listen $(entry.listener);
 > end
 
+    error_page 400 404 408 411 412 413 414 417 494 /kong_error_handler;
+    error_page 500 502 503 504                     /kong_error_handler;
+
     access_log ${{PROXY_ACCESS_LOG}};
     error_log  ${{PROXY_ERROR_LOG}} ${{LOG_LEVEL}};
 
@@ -94,31 +97,27 @@ server {
     set_real_ip_from $(ip);
 > end
 
+    rewrite_by_lua_block {
+        Kong.rewrite()
+    }
+
+    access_by_lua_block {
+        Kong.access()
+    }
+
+    header_filter_by_lua_block {
+        Kong.header_filter()
+    }
+
+    body_filter_by_lua_block {
+        Kong.body_filter()
+    }
+
+    log_by_lua_block {
+        Kong.log()
+    }
+
     location / {
-
-        error_page 400 404 408 411 412 413 414 417 494 /kong_error_handler;
-        error_page 500 502 503 504                     /kong_error_handler;
-
-        rewrite_by_lua_block {
-            Kong.rewrite()
-        }
-
-        access_by_lua_block {
-            Kong.access()
-        }
-
-        header_filter_by_lua_block {
-            Kong.header_filter()
-        }
-
-        body_filter_by_lua_block {
-            Kong.body_filter()
-        }
-
-        log_by_lua_block {
-            Kong.log()
-        }
-
         default_type                     '';
 
         set $ctx_ref                     '';
@@ -164,9 +163,11 @@ server {
 
 > if static_url_path then
     location ${{STATIC_URL_PATH}} {
+        set $ctx_ref                     '';
+        set $kong_proxy_mode             'file';
+
         root ${{STATIC_FILE_PATH}};
         index index.htm index.html;
-        #return 200 'Hello';
     }
 > end
 
