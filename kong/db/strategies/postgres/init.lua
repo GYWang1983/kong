@@ -181,14 +181,27 @@ local function collapse(name, map)
 end
 
 
-local function escape_identifier(connector, identifier, field)
+local function escape_identifier(connector, identifier, field, schema, alias_name)
   identifier = connector:escape_identifier(identifier)
 
-  if field and field.timestamp then
-    return concat { "EXTRACT(EPOCH FROM ", identifier, " AT TIME ZONE 'UTC') AS ", identifier }
+  local alias = identifier
+  if schema then
+    local table_name_escaped = connector:escape_identifier(schema.physical_name or schema.name)
+    identifier = concat { table_name_escaped, '.', identifier }
   end
 
-  return identifier
+  if alias_name then
+    alias = connector:escape_identifier(alias_name)
+  end
+
+  if field and field.timestamp then
+    return concat { "EXTRACT(EPOCH FROM ", identifier, " AT TIME ZONE 'UTC') AS ", alias }
+  elseif schema and alias_name ~= false then
+    return concat { identifier, " AS ", alias }
+  else
+    return identifier
+  end
+
 end
 
 
@@ -472,6 +485,7 @@ local function execute(strategy, statement_name, attributes, options)
   end
 
   local sql = statement.make(argv)
+  -- kong.log("SQL=", sql)
   return connector:query(sql, statement.operation)
 end
 
@@ -825,6 +839,7 @@ function _M.new(connector, schema, errors)
     primary_key_fields[field_name]    = true
   end
 
+  local has_join                      = false
   local has_ttl                       = schema.ttl == true
   local has_tags                      = schema.fields.tags ~= nil
   local has_composite_cache_key       = schema.cache_key and #schema.cache_key > 1
@@ -832,14 +847,21 @@ function _M.new(connector, schema, errors)
   local fields                        = {}
   local fields_hash                   = {}
 
-  local table_name                    = schema.name
+  local table_name                    = schema.physical_name or schema.name
   local table_name_escaped            = escape_identifier(connector, table_name)
+  local table_joins                   = {}
 
   local foreign_key_list              = {}
   local foreign_keys                  = {}
 
   local unique_fields                 = {}
 
+  for _, field in schema:each_field() do
+    if field.type == "foreign" and field.join_fields then
+      has_join = true
+      break
+    end
+  end
 
   for field_name, field in schema:each_field() do
     if field.type == "foreign" then
@@ -848,6 +870,7 @@ function _M.new(connector, schema, errors)
       local foreign_key_escaped      = {}
       local foreign_col_names        = {}
       local is_unique_foreign        = field.unique == true
+      local is_required              = field.required == true
 
       for _, foreign_field_name in ipairs(foreign_schema.primary_key) do
         local foreign_field
@@ -863,7 +886,7 @@ function _M.new(connector, schema, errors)
         fields_hash[name] = foreign_field
 
         local prepared_field         = {
-          referenced_table           = foreign_schema.name,
+          referenced_table           = foreign_schema.physical_name or foreign_schema.name,
           referenced_column          = foreign_field_name,
           on_update                  = format_on_condition(field.on_update),
           on_delete                  = format_on_condition(field.on_delete),
@@ -887,7 +910,7 @@ function _M.new(connector, schema, errors)
 
         insert(foreign_key_names, name)
         insert(foreign_key_escaped, prepared_field.name_escaped)
-        insert(foreign_col_names, escape_identifier(connector, foreign_field_name))
+        insert(foreign_col_names, escape_identifier(connector, foreign_field_name, nil, foreign_schema, false))
         insert(foreign_key_list, {
           from   = name,
           entity = field_name,
@@ -896,9 +919,50 @@ function _M.new(connector, schema, errors)
       end
 
       foreign_keys[field_name] = {
-        names   = foreign_key_names,
-        escaped = foreign_key_escaped,
+        names    = foreign_key_names,
+        escaped  = foreign_key_escaped,
+        cols     = foreign_col_names,
+        required = is_required
       }
+
+      if field.join_fields then
+
+        for _, foreign_field_name in ipairs(field.join_fields) do
+          local foreign_field
+          for foreign_schema_field_name, foreign_schema_field in foreign_schema:each_field() do
+            if foreign_schema_field_name == foreign_field_name then
+              foreign_field = foreign_schema_field
+              break
+            end
+          end
+
+          if foreign_field then
+
+            local name = field_name .. "_" .. foreign_field_name
+
+            fields_hash[name] = foreign_field
+
+            local prepared_field         = {
+              referenced_table           = foreign_schema.physical_name or foreign_schema.name,
+              referenced_column          = foreign_field_name,
+              name                       = name,
+              name_escaped               = escape_identifier(connector, name),
+              name_expression            = escape_identifier(connector, foreign_field_name, foreign_field, foreign_schema, name),
+              field_name                 = field_name,
+              is_joined                  = true
+            }
+
+            insert(fields, prepared_field)
+            insert(foreign_key_list, {
+              from   = name,
+              entity = field_name,
+              to     = foreign_field_name
+            })
+          end
+        end
+
+        table_joins[foreign_schema.name] = foreign_keys[field_name]
+      end
 
     else
       fields_hash[field_name]        = field
@@ -912,6 +976,7 @@ function _M.new(connector, schema, errors)
         name_expression          = escape_identifier(connector, field_name, field),
         is_used_in_primary_key   = is_used_in_primary_key,
         is_part_of_composite_key = is_part_of_composite_key,
+        timestamp                = field.timestamp,
         is_unique                = field.unique == true,
         is_unique_across_ws      = field.unique_across_ws == true,
         is_endpoint_key          = schema.endpoint_key == field_name,
@@ -937,7 +1002,13 @@ function _M.new(connector, schema, errors)
   local upsert_expressions       = {}
   local page_next_names          = {}
 
-  for i, field in ipairs(fields) do
+  local joined_expressions       = false
+  if has_join then
+    joined_expressions = {}
+  end
+
+  local i = 0
+  for _, field in ipairs(fields) do
     local name                     = field.name
     local name_escaped             = field.name_escaped
     local name_expression          = field.name_expression
@@ -946,28 +1017,38 @@ function _M.new(connector, schema, errors)
     local is_unique                = field.is_unique
     local is_unique_foreign        = field.is_unique_foreign
     local is_endpoint_key          = field.is_endpoint_key
+    local is_joined                = field.is_joined
     local referenced_table         = field.referenced_table
 
-    insert(insert_names,       name)
-    insert(insert_columns,     name_escaped)
-    insert(insert_expressions, "$" .. i)
-    insert(select_expressions, name_expression)
+    if is_joined then
+      insert(joined_expressions, name_expression)
+    else
+      i = i + 1
+      insert(insert_names,       name)
+      insert(insert_columns,     name_escaped)
+      insert(insert_expressions, "$" .. i)
+      insert(select_expressions, name_expression)
 
-    if not is_used_in_primary_key then
-      insert(update_names,       name)
-      insert(update_expressions, name_escaped .. " = $" .. #update_names)
-      insert(upsert_expressions, name_escaped .. " = " .. "EXCLUDED." .. name_escaped)
-    end
+      if not is_used_in_primary_key then
+        insert(update_names,       name)
+        insert(update_expressions, name_escaped .. " = $" .. #update_names)
+        insert(upsert_expressions, name_escaped .. " = " .. "EXCLUDED." .. name_escaped)
+      end
 
-    if ((not is_used_in_primary_key) or is_part_of_composite_key)
-       and ((referenced_table and not is_part_of_composite_key)
-            or is_unique_foreign
-            or is_unique
-            or (is_endpoint_key and not is_unique))
-    then
-      -- treat endpoint_key like a unique key anyway,
-      -- they are indexed (example: target.target)
-      insert(unique_fields, field)
+      if ((not is_used_in_primary_key) or is_part_of_composite_key)
+              and ((referenced_table and not is_part_of_composite_key)
+              or is_unique_foreign
+              or is_unique
+              or (is_endpoint_key and not is_unique))
+      then
+        -- treat endpoint_key like a unique key anyway,
+        -- they are indexed (example: target.target)
+        insert(unique_fields, field)
+      end
+
+      if has_join then
+        insert(joined_expressions, escape_identifier(connector, name, field, schema))
+      end
     end
   end
 
@@ -1006,6 +1087,7 @@ function _M.new(connector, schema, errors)
   end
 
   local primary_key_escaped = {}
+  local primary_key_select_where = {}
   for i, key in ipairs(primary_key) do
     local primary_key_field = primary_key_fields[key]
 
@@ -1015,15 +1097,28 @@ function _M.new(connector, schema, errors)
     insert(update_args_names,        primary_key_field.name)
     insert(update_placeholders,      "$" .. #update_args_names)
     insert(primary_key_placeholders, "$" .. i)
+
+    if has_join then
+      insert(primary_key_select_where,   escape_identifier(connector, primary_key_field.name, nil, schema, false))
+    end
   end
 
   insert(page_next_names, LIMIT)
 
   local pk_escaped = concat(primary_key_escaped, ", ")
+  if has_join then
+    primary_key_select_where = concat(primary_key_select_where, ", ")
+  else
+    primary_key_select_where = pk_escaped
+  end
 
   select_expressions       = concat(select_expressions, ", ")
   primary_key_placeholders = concat(primary_key_placeholders, ", ")
   update_placeholders      = concat(update_placeholders, ", ")
+
+  if has_join then
+    joined_expressions     = concat(joined_expressions, ", ")
+  end
 
   if has_composite_cache_key then
     fields_hash.cache_key = { type = "string" }
@@ -1033,6 +1128,29 @@ function _M.new(connector, schema, errors)
     insert(insert_columns, cache_key_escaped)
   end
 
+  local select_from = { table_name_escaped }
+  for foreign_table_name, foreign in pairs(table_joins) do
+    if foreign.required then
+      insert(select_from, "INNER JOIN")
+    else
+      insert(select_from, "LEFT JOIN")
+    end
+    insert(select_from, escape_identifier(connector, foreign_table_name))
+    insert(select_from, "ON")
+
+    local foreign_key_names = foreign.names
+    local foreign_cols = foreign.cols
+    for n, foreign_key in ipairs(foreign_key_names) do
+      if n > 1 then
+        insert(select_from, "AND")
+      end
+      insert(select_from, escape_identifier(connector, foreign_key, nil, schema, false))
+      insert(select_from, "=")
+      insert(select_from, foreign_cols[n])
+    end
+  end
+  select_from = concat(select_from, " ")
+
   local ws_id_select_where
   if has_ws_id then
     fields_hash.ws_id = { type = "string", uuid = true }
@@ -1041,7 +1159,12 @@ function _M.new(connector, schema, errors)
     insert(insert_expressions, "$0")
     insert(insert_columns, ws_id_escaped)
 
-    ws_id_select_where = "(" .. ws_id_escaped .. " = $0)"
+    if has_join then
+      local ws_id_expression = concat { table_name_escaped, ".", ws_id_escaped }
+      ws_id_select_where = "(" .. ws_id_expression .. " = $0)"
+    else
+      ws_id_select_where = "(" .. ws_id_escaped .. " = $0)"
+    end
   end
 
   local ttl_select_where
@@ -1055,13 +1178,27 @@ function _M.new(connector, schema, errors)
     select_expressions = concat {
       select_expressions, ",",
       "FLOOR(EXTRACT(EPOCH FROM (",
-        ttl_escaped, " AT TIME ZONE 'UTC' - CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
+      ttl_escaped, " AT TIME ZONE 'UTC' - CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
       "))) AS ", ttl_escaped
     }
 
-    ttl_select_where = concat {
-      "(", ttl_escaped, " IS NULL OR ", ttl_escaped, " >= CURRENT_TIMESTAMP AT TIME ZONE 'UTC')"
-    }
+    if has_join then
+      local ttl_expression = concat { table_name_escaped, ".", ttl_escaped }
+      joined_expressions = concat {
+        joined_expressions, ",",
+        "FLOOR(EXTRACT(EPOCH FROM (",
+        ttl_expression, " AT TIME ZONE 'UTC' - CURRENT_TIMESTAMP AT TIME ZONE 'UTC'",
+        "))) AS ", ttl_escaped
+      }
+
+      ttl_select_where = concat {
+        "(", ttl_expression, " IS NULL OR ", ttl_expression, " >= CURRENT_TIMESTAMP AT TIME ZONE 'UTC')"
+      }
+    else
+      ttl_select_where = concat {
+        "(", ttl_escaped, " IS NULL OR ", ttl_escaped, " >= CURRENT_TIMESTAMP AT TIME ZONE 'UTC')"
+      }
+    end
   end
 
   insert_expressions = concat(insert_expressions,  ", ")
@@ -1189,14 +1326,14 @@ function _M.new(connector, schema, errors)
 
   add_statement("select", {
     operation = "read",
-    expr = select_expressions,
+    expr = joined_expressions or select_expressions,
     argn = primary_key_names,
     argv = primary_key_args,
     code = {
-      "SELECT ",  select_expressions, "\n",
-      "  FROM ",  table_name_escaped, "\n",
+      "SELECT ",  (joined_expressions or select_expressions), "\n",
+      "  FROM ",  select_from, "\n",
       where_clause(
-      " WHERE ", "(" .. pk_escaped .. ") = (" .. primary_key_placeholders .. ")",
+      " WHERE ", "(" .. primary_key_select_where .. ") = (" .. primary_key_placeholders .. ")",
                  ttl_select_where,
                  ws_id_select_where),
       " LIMIT 1;"
@@ -1208,12 +1345,13 @@ function _M.new(connector, schema, errors)
     argn = { LIMIT },
     argv = single_args,
     code = {
-      "  SELECT ",  select_expressions, "\n",
-      "    FROM ",  table_name_escaped, "\n",
+      "  SELECT ",  (joined_expressions or select_expressions), "\n",
+      "    FROM ",  select_from, "\n",
       where_clause(
-      "   WHERE ", ttl_select_where,
+      "   WHERE ",
+                   ttl_select_where,
                    ws_id_select_where),
-      "ORDER BY ",  pk_escaped, "\n",
+      "ORDER BY ",  primary_key_select_where, "\n",
       "   LIMIT $1;";
     }
   })
@@ -1223,13 +1361,13 @@ function _M.new(connector, schema, errors)
     argn = page_next_names,
     argv = page_next_args,
     code = {
-      "  SELECT ",  select_expressions, "\n",
-      "    FROM ",  table_name_escaped, "\n",
+      "  SELECT ",  (joined_expressions or select_expressions), "\n",
+      "    FROM ",  select_from, "\n",
       where_clause(
-      "   WHERE ", "(" .. pk_escaped .. ") > (" .. primary_key_placeholders .. ")",
+      "   WHERE ", "(" .. primary_key_select_where .. ") > (" .. primary_key_placeholders .. ")",
                    ttl_select_where,
                    ws_id_select_where),
-      "ORDER BY ",  pk_escaped, "\n",
+      "ORDER BY ",  primary_key_select_where, "\n",
       "   LIMIT " .. placeholder(#page_next_names), ";"
     }
   })
@@ -1273,13 +1411,13 @@ function _M.new(connector, schema, errors)
         argn = argn_first,
         argv = argv_first,
         code = {
-          "  SELECT ",  select_expressions, "\n",
-          "    FROM ",  table_name_escaped, "\n",
+          "  SELECT ",  (joined_expressions or select_expressions), "\n",
+          "    FROM ",  select_from, "\n",
           where_clause(
           "   WHERE ", "(" .. foreign_key_names .. ") = (" .. fk_placeholders .. ")",
                        ttl_select_where,
                        ws_id_select_where),
-          "ORDER BY ", pk_escaped, "\n",
+          "ORDER BY ", primary_key_select_where, "\n",
           "   LIMIT ", placeholder(#argn_first), ";";
         }
       })
@@ -1289,14 +1427,14 @@ function _M.new(connector, schema, errors)
         argn = argn_next,
         argv = argv_next,
         code = {
-          "  SELECT ",  select_expressions, "\n",
-          "    FROM ",  table_name_escaped, "\n",
+          "  SELECT ",  (joined_expressions or select_expressions), "\n",
+          "    FROM ",  select_from, "\n",
           where_clause(
           "   WHERE ", "(" .. foreign_key_names .. ") = (" .. fk_placeholders .. ")",
-                       "(" .. pk_escaped .. ") > (" .. pk_placeholders .. ")",
+                       "(" .. primary_key_select_where .. ") > (" .. pk_placeholders .. ")",
                        ttl_select_where,
                        ws_id_select_where),
-          "ORDER BY ", pk_escaped, "\n",
+          "ORDER BY ", primary_key_select_where, "\n",
           "   LIMIT ", placeholder(#argn_next), ";"
         }
       })
@@ -1317,6 +1455,13 @@ function _M.new(connector, schema, errors)
     end
     insert(argn_next, LIMIT)
 
+    local tag_select_field
+    if has_join then
+      tag_select_field = escape_identifier(connector, "tags", nil, schema, false) .. " "
+    else
+      tag_select_field = "tags "
+    end
+
     for cond, op in pairs({["_and"] = "@>", ["_or"] = "&&"}) do
 
       add_statement("page_by_tags" .. cond .. "_first", {
@@ -1324,13 +1469,13 @@ function _M.new(connector, schema, errors)
         argn = argn_first,
         argv = {},
         code = {
-          "  SELECT ",  select_expressions, "\n",
-          "    FROM ",  table_name_escaped, "\n",
+          "  SELECT ",  (joined_expressions or select_expressions), "\n",
+          "    FROM ",  select_from, "\n",
           where_clause(
-          "   WHERE ", "tags " .. op .. " $1",
+          "   WHERE ", tag_select_field .. op .. " $1",
                        ttl_select_where,
                        ws_id_select_where),
-          "ORDER BY ",  pk_escaped, "\n",
+          "ORDER BY ",  primary_key_select_where, "\n",
           "   LIMIT $2;";
         },
       })
@@ -1340,14 +1485,14 @@ function _M.new(connector, schema, errors)
         argn = argn_next,
         argv = {},
         code = {
-          "  SELECT ",  select_expressions, "\n",
-          "    FROM ",  table_name_escaped, "\n",
+          "  SELECT ",  (joined_expressions or select_expressions), "\n",
+          "    FROM ",  select_from, "\n",
           where_clause(
-          "   WHERE ", "tags " .. op .. " $1",
-                       "(" .. pk_escaped .. ") > (" .. concat(pk_placeholders, ", ") .. ")",
+          "   WHERE ", tag_select_field .. op .. " $1",
+                       "(" .. primary_key_select_where .. ") > (" .. concat(pk_placeholders, ", ") .. ")",
                        ttl_select_where,
                        ws_id_select_where),
-          "ORDER BY ", pk_escaped, "\n",
+          "ORDER BY ", primary_key_select_where, "\n",
           "   LIMIT ", placeholder(#argn_next), ";"
         }
       })
@@ -1355,6 +1500,7 @@ function _M.new(connector, schema, errors)
   end
 
   if has_composite_cache_key then
+    -- TODO: with joined fields
     insert(unique_fields, {
       name = "cache_key",
       name_escaped = escape_identifier(connector, "cache_key"),
@@ -1370,15 +1516,22 @@ function _M.new(connector, schema, errors)
       local unique_escaped = unique_field.name_escaped
       local single_names   = { unique_name }
 
+      local unique_select_where
+      if has_join then
+        unique_select_where = escape_identifier(connector, unique_field.name, nil, schema, false)
+      else
+        unique_select_where = unique_escaped
+      end
+
       add_statement("select_by_" .. field_name, {
         operation = "read",
         argn = single_names,
         argv = single_args,
         code = {
-          "SELECT ",  select_expressions, "\n",
-          "  FROM ",  table_name_escaped, "\n",
+          "SELECT ",  (joined_expressions or select_expressions), "\n",
+          "  FROM ",  select_from, "\n",
           where_clause(
-          " WHERE ",  unique_escaped .. " = $1",
+          " WHERE ",  unique_select_where .. " = $1",
                       ttl_select_where,
                       ws_id_select_where),
           " LIMIT 1;"

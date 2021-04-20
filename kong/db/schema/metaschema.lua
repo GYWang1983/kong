@@ -70,6 +70,7 @@ local field_schema = {
   { generate_admin_api = { type = "boolean" }, },
   { legacy = { type = "boolean" }, },
   { immutable = { type = "boolean" }, },
+  { join_fields = { type = "array", elements = { type = "string" } }, },
   { err = { type = "string" } },
 }
 
@@ -502,6 +503,12 @@ local MetaSchema = Schema.new({
         type = "string",
         required = true
       },
+    },
+    {
+      physical_name = {
+        type = "string",
+        nilable = true
+      }
     },
     {
       primary_key = {
