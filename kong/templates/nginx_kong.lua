@@ -165,7 +165,9 @@ server {
     location ${{STATIC_URL_PATH}} {
         set $ctx_ref                     '';
         set $kong_proxy_mode             'file';
-
+        if ($request_filename ~ .*\.(htm|html)$) {
+            add_header Cache-Control no-cache;
+        }
         root ${{STATIC_FILE_PATH}};
         index index.htm index.html;
     }
