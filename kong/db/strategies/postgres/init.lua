@@ -961,7 +961,7 @@ function _M.new(connector, schema, errors)
           end
         end
 
-        table_joins[foreign_schema.name] = foreign_keys[field_name]
+        table_joins[foreign_schema.physical_name or foreign_schema.name] = foreign_keys[field_name]
       end
 
     else
