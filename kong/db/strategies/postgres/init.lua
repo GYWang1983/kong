@@ -485,7 +485,7 @@ local function execute(strategy, statement_name, attributes, options)
   end
 
   local sql = statement.make(argv)
-  -- kong.log("SQL=", sql)
+  -- log(ngx.DEBUG, sql)
   return connector:query(sql, statement.operation)
 end
 
@@ -928,40 +928,57 @@ function _M.new(connector, schema, errors)
       if field.join_fields then
 
         for _, foreign_field_name in ipairs(field.join_fields) do
-          local foreign_field
           for foreign_schema_field_name, foreign_schema_field in foreign_schema:each_field() do
             if foreign_schema_field_name == foreign_field_name then
-              foreign_field = foreign_schema_field
+              if foreign_schema_field.type == "foreign" then
+                kong.log.inspect("foreign_schema_field", foreign_schema_field)
+                for _, pk_field_name in ipairs(foreign_schema_field.schema.primary_key) do
+                  local name = foreign_field_name .. "_" .. pk_field_name
+                  fields_hash[name] = foreign_schema_field.schema.fields[pk_field_name]
+
+                  local prepared_field         = {
+                    referenced_table           = foreign_schema.physical_name or foreign_schema.name,
+                    referenced_column          = foreign_field_name,
+                    name                       = name,
+                    name_escaped               = escape_identifier(connector, name),
+                    name_expression            = escape_identifier(connector, name, foreign_schema_field, foreign_schema, name),
+                    field_name                 = field_name,
+                    is_joined                  = true
+                  }
+
+                  insert(fields, prepared_field)
+                  insert(foreign_key_list, {
+                    from   = name,
+                    entity = field_name,
+                    to     = foreign_field_name
+                  })
+                end
+              else
+                local name = field_name .. "_" .. foreign_field_name
+                fields_hash[name] = foreign_schema_field
+
+                local prepared_field         = {
+                  referenced_table           = foreign_schema.physical_name or foreign_schema.name,
+                  referenced_column          = foreign_field_name,
+                  name                       = name,
+                  name_escaped               = escape_identifier(connector, name),
+                  name_expression            = escape_identifier(connector, foreign_field_name, foreign_schema_field, foreign_schema, name),
+                  field_name                 = field_name,
+                  is_joined                  = true
+                }
+
+                insert(fields, prepared_field)
+                insert(foreign_key_list, {
+                  from   = name,
+                  entity = field_name,
+                  to     = foreign_field_name
+                })
+              end
+              table_joins[foreign_schema.physical_name or foreign_schema.name] = foreign_keys[field_name]
               break
             end
           end
-
-          if foreign_field then
-
-            local name = field_name .. "_" .. foreign_field_name
-
-            fields_hash[name] = foreign_field
-
-            local prepared_field         = {
-              referenced_table           = foreign_schema.physical_name or foreign_schema.name,
-              referenced_column          = foreign_field_name,
-              name                       = name,
-              name_escaped               = escape_identifier(connector, name),
-              name_expression            = escape_identifier(connector, foreign_field_name, foreign_field, foreign_schema, name),
-              field_name                 = field_name,
-              is_joined                  = true
-            }
-
-            insert(fields, prepared_field)
-            insert(foreign_key_list, {
-              from   = name,
-              entity = field_name,
-              to     = foreign_field_name
-            })
-          end
         end
-
-        table_joins[foreign_schema.physical_name or foreign_schema.name] = foreign_keys[field_name]
       end
 
     else
