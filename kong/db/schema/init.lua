@@ -1085,6 +1085,9 @@ validate_fields = function(self, input)
       field, err = resolve_field(self, k, field, subschema)
       if field then
         _, errors[k] = self:validate_field(field, v)
+      elseif self.unknown_field_handler == 'ignore' then
+        kong.log.debug("ignoring unknown field: ", err)
+        input[k] = nil
       else
         errors[k] = err
       end

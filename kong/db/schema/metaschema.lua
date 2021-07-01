@@ -545,6 +545,14 @@ local MetaSchema = Schema.new({
       }
     },
     {
+      unknown_field_handler = {
+        type = "string",
+        nilable = true,
+        one_of = {"error", "ignore", "preserve"},
+        default = "error"
+      }
+    },
+    {
       db_export = {
         type = "boolean",
         nilable = true,

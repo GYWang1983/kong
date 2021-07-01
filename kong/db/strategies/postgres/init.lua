@@ -931,7 +931,6 @@ function _M.new(connector, schema, errors)
           for foreign_schema_field_name, foreign_schema_field in foreign_schema:each_field() do
             if foreign_schema_field_name == foreign_field_name then
               if foreign_schema_field.type == "foreign" then
-                kong.log.inspect("foreign_schema_field", foreign_schema_field)
                 for _, pk_field_name in ipairs(foreign_schema_field.schema.primary_key) do
                   local name = foreign_field_name .. "_" .. pk_field_name
                   fields_hash[name] = foreign_schema_field.schema.fields[pk_field_name]
