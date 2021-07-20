@@ -123,7 +123,7 @@ local function expand(name, map)
         $NILS
       ]]):gsub("$(%a+)", {
         ENTITY = entity,
-        EXPS = concat(exps, " and "),
+        EXPS = concat(exps, " or "),
         KEYS = concat(keys, ", "),
         NILS = concat(nils, "; "),
       })))
