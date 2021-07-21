@@ -842,7 +842,7 @@ function _M.new(connector, schema, errors)
   local has_join                      = false
   local has_ttl                       = schema.ttl == true
   local has_tags                      = schema.fields.tags ~= nil
-  local has_composite_cache_key       = schema.cache_key and #schema.cache_key > 1
+  local has_composite_cache_key       = schema.cache_key and (type(schema.cache_key) == 'function' or #schema.cache_key > 1)
   local has_ws_id                     = schema.workspaceable == true
   local fields                        = {}
   local fields_hash                   = {}

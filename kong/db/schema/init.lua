@@ -2122,7 +2122,7 @@ function Schema.new(definition, is_subschema)
   local self = copy(definition)
   setmetatable(self, Schema)
 
-  if self.cache_key then
+  if self.cache_key and type(self.cache_key) == 'array' then
     self.cache_key_set = {}
     for _, name in ipairs(self.cache_key) do
       self.cache_key_set[name] = true

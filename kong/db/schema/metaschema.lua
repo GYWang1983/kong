@@ -275,7 +275,7 @@ local meta_errors = {
   FIELDS_ARRAY = "each entry in fields must be a sub-table",
   FIELDS_KEY = "each key in fields must be a string",
   ENDPOINT_KEY = "value must be a field name",
-  CACHE_KEY = "values must be field names",
+  CACHE_KEY = "values must be field names or function",
   CACHE_KEY_UNIQUE = "a field used as a single cache key must be unique",
   TTL_RESERVED = "ttl is a reserved field name when ttl is enabled",
   SUBSCHEMA_KEY = "value must be a field name",
@@ -531,10 +531,10 @@ local MetaSchema = Schema.new({
     },
     {
       cache_key = {
-        type = "array",
-        elements = {
-          type = "string",
-        },
+        type = "any",
+        --elements = {
+        --  type = "string",
+        --},
         nilable = true,
       },
     },
@@ -652,25 +652,29 @@ local MetaSchema = Schema.new({
     end
 
     if schema.cache_key then
-      local found
-      for _, e in ipairs(schema.cache_key) do
-        found = nil
-        for _, item in ipairs(schema.fields) do
-          local k = next(item)
-          if e == k then
-            found = item[k]
+      if type(schema.cache_key) == 'table' then
+        local found
+        for _, e in ipairs(schema.cache_key) do
+          found = nil
+          for _, item in ipairs(schema.fields) do
+            local k = next(item)
+            if e == k then
+              found = item[k]
+              break
+            end
+          end
+          if not found then
+            errors["cache_key"] = meta_errors.CACHE_KEY
             break
           end
         end
-        if not found then
-          errors["cache_key"] = meta_errors.CACHE_KEY
-          break
+        if #schema.cache_key == 1 then
+          if found and not found.unique then
+            errors["cache_key"] = meta_errors.CACHE_KEY_UNIQUE
+          end
         end
-      end
-      if #schema.cache_key == 1 then
-        if found and not found.unique then
-          errors["cache_key"] = meta_errors.CACHE_KEY_UNIQUE
-        end
+      elseif type(schema.cache_key) ~= 'function' then
+        errors["cache_key"] = meta_errors.CACHE_KEY
       end
     end
 
