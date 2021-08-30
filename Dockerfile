@@ -12,6 +12,7 @@ USER kong
 COPY kong/db/strategies/postgres/init.lua /usr/local/share/lua/5.1/kong/db/strategies/postgres/init.lua
 COPY kong/db/schema/init.lua /usr/local/share/lua/5.1/kong/db/schema/init.lua
 COPY kong/db/schema/metaschema.lua /usr/local/share/lua/5.1/kong/db/schema/metaschema.lua
+COPY kong/db/dao/init.lua /usr/local/share/lua/5.1/kong/db/dao/init.lua
 COPY kong/init.lua /usr/local/share/lua/5.1/kong/init.lua
 COPY kong/templates/*.lua /usr/local/share/lua/5.1/kong/templates/
 
