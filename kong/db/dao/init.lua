@@ -1488,7 +1488,7 @@ function DAO:cache_key(key, arg2, arg3, arg4, arg5, ws_id)
     error("key must be a string or an entity table", 2)
   end
 
-  if key.ws_id then
+  if key.ws_id and self.schema.workspaceable then
     ws_id = key.ws_id
   end
 
