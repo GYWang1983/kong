@@ -274,12 +274,16 @@ local function toerror(strategy, err, primary_key, entity)
 
     if find(err, "cache_key", 1, true) then
       local keys = {}
-      for _, k in ipairs(schema.cache_key) do
-        local field = schema.fields[k]
-        if field.type == "foreign" and entity[k] ~= null then
-          keys[k] = field.schema:extract_pk_values(entity[k])
-        else
-          keys[k] = entity[k]
+      if type(schema.cache_key) == 'function' then
+        keys['cache_key'] = schema.cache_key(entity)
+      else
+        for _, k in ipairs(schema.cache_key) do
+          local field = schema.fields[k]
+          if field.type == "foreign" and entity[k] ~= null then
+            keys[k] = field.schema:extract_pk_values(entity[k])
+          else
+            keys[k] = entity[k]
+          end
         end
       end
       return nil, errors:unique_violation(keys)
