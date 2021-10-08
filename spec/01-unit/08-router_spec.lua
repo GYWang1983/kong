@@ -1417,6 +1417,82 @@ describe("Router", function()
       end)
     end)
 
+    describe("normalization stopgap measurements", function()
+      local use_case = {
+        -- percent encoding with unreserved char, route should be plain text
+        {
+          service = service,
+          route   = {
+            paths = {
+              "/plain/a.b%2Ec", -- /plain/a.b.c
+            },
+          },
+        },
+        -- regex
+        {
+          service = service,
+          route   = {
+            paths = {
+              "/reg%65x/\\d+", -- /regex/\d+
+            },
+          },
+        },
+        {
+          service = service,
+          route   = {
+            paths = {
+              "/regex-meta/%5Cd\\+%2E", -- /regex/\d+.
+            },
+          },
+        },
+        {
+          service = service,
+          route   = {
+            paths = {
+              "/regex-reserved%2Fabc", -- /regex-reserved/abc
+            },
+          },
+        },
+      }
+      local router = assert(Router.new(use_case))
+
+      it("matches against plain text paths", function()
+        local match_t = router.select("GET", "/plain/a.b.c", "example.com")
+        assert.truthy(match_t)
+        assert.same(use_case[1].route, match_t.route)
+
+        match_t = router.select("GET", "/plain/aab.c", "example.com")
+        assert.falsy(match_t)
+      end)
+
+      it("matches against regex paths", function()
+        local match_t = router.select("GET", "/regex/123", "example.com")
+        assert.truthy(match_t)
+        assert.same(use_case[2].route, match_t.route)
+
+        match_t = router.select("GET", "/regex/\\d+", "example.com")
+        assert.falsy(match_t)
+      end)
+
+      it("escapes meta character after percent decoding from regex paths", function()
+        local match_t = router.select("GET", "/regex-meta/123a", "example.com")
+        assert.falsy(match_t)
+
+        match_t = router.select("GET", "/regex-meta/\\d+.", "example.com")
+        assert.truthy(match_t)
+        assert.same(use_case[3].route, match_t.route)
+      end)
+
+      it("leave reserved characters alone in regex paths", function()
+        local match_t = router.select("GET", "/regex-reserved/abc", "example.com")
+        assert.falsy(match_t)
+
+        match_t = router.select("GET", "/regex-reserved%2Fabc", "example.com")
+        assert.truthy(match_t)
+        assert.same(use_case[4].route, match_t.route)
+      end)
+    end)
+
     describe("edge-cases", function()
       it("[host] and [uri] have higher priority than [method]", function()
         local use_case = {
@@ -2480,22 +2556,22 @@ describe("Router", function()
       assert.equal(8443, match_t.upstream_url_t.port)
     end)
 
-    it("allows url encoded paths", function()
+    it("allows url encoded paths if they are reserved characters", function()
       local use_case_routes = {
         {
           service = service,
           route   = {
-            paths = { "/endel%C3%B8st" },
+            paths = { "/endel%2Fst" },
           },
         },
       }
 
       local router = assert(Router.new(use_case_routes))
-      local _ngx = mock_ngx("GET", "/endel%C3%B8st", { host = "domain.org" })
+      local _ngx = mock_ngx("GET", "/endel%2Fst", { host = "domain.org" })
       router._set_ngx(_ngx)
       local match_t = router.exec()
       assert.same(use_case_routes[1].route, match_t.route)
-      assert.equal("/endel%C3%B8st", match_t.upstream_uri)
+      assert.equal("/endel%2Fst", match_t.upstream_uri)
     end)
 
     describe("stripped paths #strip", function()
@@ -2545,6 +2621,16 @@ describe("Router", function()
       end)
 
       it("doesn't strip if 'strip_uri' is not enabled", function()
+        local _ngx = mock_ngx("POST", "/my-route/hello/world",
+                              { host = "domain.org" })
+        router._set_ngx(_ngx)
+        local match_t = router.exec()
+        assert.same(use_case_routes[2].route, match_t.route)
+        assert.is_nil(match_t.prefix)
+        assert.equal("/my-route/hello/world", match_t.upstream_uri)
+      end)
+
+      it("normalized client URI before matching and proxying", function()
         local _ngx = mock_ngx("POST", "/my-route/hello/world",
                               { host = "domain.org" })
         router._set_ngx(_ngx)
@@ -2627,18 +2713,18 @@ describe("Router", function()
           {
             service      = service,
             route        = {
-              paths      = { "/endel%C3%B8st" },
+              paths      = { "/endel%2Fst" },
               strip_path = true,
             },
           },
         }
 
         local router = assert(Router.new(use_case_routes))
-        local _ngx = mock_ngx("GET", "/endel%C3%B8st", { host = "domain.org" })
+        local _ngx = mock_ngx("GET", "/endel%2Fst", { host = "domain.org" })
         router._set_ngx(_ngx)
         local match_t = router.exec()
         assert.same(use_case_routes[1].route, match_t.route)
-        assert.equal("/endel%C3%B8st", match_t.prefix)
+        assert.equal("/endel%2Fst", match_t.prefix)
         assert.equal("/", match_t.upstream_uri)
       end)
 
@@ -3445,4 +3531,54 @@ describe("Router", function()
       assert.same(use_case[2].route, match_t.route)
     end)
   end)
+end)
+
+describe("[both regex and prefix with regex_priority]", function()
+  local use_case = {
+    -- regex  
+    {
+      service = service,
+      route   = {
+        paths = {
+          "/.*"
+        },
+        hosts = {
+          "domain-1.org",
+        },
+      },
+    },
+    -- prefix
+    {
+      service = service,
+      route   = {
+        paths = {
+          "/"
+        },
+        hosts = {
+          "domain-2.org",
+        },
+        regex_priority = 5
+      },
+    },
+    {
+      service = service,
+      route   = {
+        paths = {
+          "/v1"
+        },
+        hosts = {
+          "domain-2.org",
+        },
+      },
+    },
+  }
+
+  local router = assert(Router.new(use_case))
+
+  it("[prefix matching ignore regex_priority]", function()
+    local match_t = router.select("GET", "/v1", "domain-2.org")
+    assert.truthy(match_t)
+    assert.same(use_case[3].route, match_t.route)
+  end)
+
 end)

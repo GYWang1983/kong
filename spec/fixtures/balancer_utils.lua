@@ -54,16 +54,16 @@ end
 
 
 local function direct_request(host, port, path, protocol, host_header)
-  local pok, client = pcall(helpers.http_client, host, port)
+  local pok, client = pcall(helpers.http_client, {
+    host = host,
+    port = port,
+    scheme = protocol,
+  })
   if not pok then
     return nil, "pcall: " .. client .. " : " .. host ..":"..port
   end
   if not client then
     return nil, "client"
-  end
-
-  if protocol == "https" then
-    assert(client:ssl_handshake())
   end
 
   local res, err = client:send {
@@ -81,6 +81,9 @@ end
 
 
 local function post_target_endpoint(upstream_id, host, port, endpoint)
+  if host == "[::1]" then
+    host = "[0000:0000:0000:0000:0000:0000:0000:0001]"
+  end
   local path = "/upstreams/" .. upstream_id
                              .. "/targets/"
                              .. utils.format_host(host, port)
@@ -103,12 +106,20 @@ local function client_requests(n, host_or_headers, proxy_host, proxy_port, proto
   local oks, fails = 0, 0
   local last_status
   for _ = 1, n do
-    local client = (proxy_host and proxy_port)
-                   and helpers.http_client(proxy_host, proxy_port)
-                   or  helpers.proxy_client()
+    local client
+    if proxy_host and proxy_port then
+      client = helpers.http_client({
+        host = proxy_host,
+        port = proxy_port,
+        scheme = protocol,
+      })
 
-    if protocol == "https" then
-      assert(client:ssl_handshake())
+    else
+      if protocol == "https" then
+        client = helpers.proxy_ssl_client()
+      else
+        client = helpers.proxy_client()
+      end
     end
 
     local res = client:send {
@@ -287,6 +298,9 @@ do
   add_target = function(bp, upstream_id, host, port, data)
     port = port or gen_port()
     local req = utils.deep_copy(data) or {}
+    if host == "[::1]" then
+      host = "[0000:0000:0000:0000:0000:0000:0000:0001]"
+    end
     req.target = req.target or utils.format_host(host, port)
     req.weight = req.weight or 10
     req.upstream = { id = upstream_id }
@@ -296,6 +310,9 @@ do
 
   update_target = function(bp, upstream_id, host, port, data)
     local req = utils.deep_copy(data) or {}
+    if host == "[::1]" then
+      host = "[0000:0000:0000:0000:0000:0000:0000:0001]"
+    end
     req.target = req.target or utils.format_host(host, port)
     req.weight = req.weight or 10
     req.upstream = { id = upstream_id }
@@ -342,6 +359,9 @@ local poll_wait_health
 local poll_wait_address_health
 do
   local function poll_wait(upstream_id, host, port, admin_port, fn)
+    if host == "[::1]" then
+      host = "[0000:0000:0000:0000:0000:0000:0000:0001]"
+    end
     local hard_timeout = ngx.now() + 70
     while ngx.now() < hard_timeout do
       local health = get_upstream_health(upstream_id, admin_port)
@@ -511,7 +531,7 @@ end
 
 local localhosts = {
   ipv4 = "127.0.0.1",
-  ipv6 = "[0000:0000:0000:0000:0000:0000:0000:0001]",
+  ipv6 = "[::1]",
   hostname = "localhost",
 }
 

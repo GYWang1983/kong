@@ -46,6 +46,7 @@ local function idempotent(tbl, err)
   end
 
   local function recurse_fields(t)
+    helpers.deep_sort(t)
     for k,v in sortedpairs(t) do
       if k == "id" and utils.is_valid_uuid(v) then
         t[k] = "UUID"
@@ -285,6 +286,7 @@ describe("declarative config: flatten", function()
                 retry_count = 10,
                 timeout = 10000,
                 headers = null,
+                custom_fields_by_lua = null,
               }
             },
             {
@@ -378,6 +380,7 @@ describe("declarative config: flatten", function()
                 retry_count = 10,
                 timeout = 10000,
                 headers = null,
+                custom_fields_by_lua = null,
               },
               consumer = {
                 id = "UUID"
@@ -560,6 +563,7 @@ describe("declarative config: flatten", function()
                   retry_count = 10,
                   timeout = 10000,
                   headers = null,
+                  custom_fields_by_lua = null,
                 },
                 consumer = null,
                 created_at = 1234567890,
@@ -600,7 +604,8 @@ describe("declarative config: flatten", function()
                   port = 10000,
                   timeout = 10000,
                   tls = false,
-                  tls_sni = null
+                  tls_sni = null,
+                  custom_fields_by_lua = null,
                 },
                 consumer = null,
                 created_at = 1234567890,
@@ -1049,6 +1054,7 @@ describe("declarative config: flatten", function()
                   retry_count = 10,
                   timeout = 10000,
                   headers = null,
+                  custom_fields_by_lua = null,
                 },
                 consumer = null,
                 created_at = 1234567890,
@@ -1089,7 +1095,8 @@ describe("declarative config: flatten", function()
                   port = 10000,
                   timeout = 10000,
                   tls = false,
-                  tls_sni = null
+                  tls_sni = null,
+                  custom_fields_by_lua = null,
                 },
                 consumer = null,
                 created_at = 1234567890,
@@ -1718,7 +1725,7 @@ describe("declarative config: flatten", function()
           ]]))
 
           config = DeclarativeConfig:flatten(config)
-          assert.same({
+          assert.same(helpers.deep_sort{
             targets = { {
                 created_at = 1234567890,
                 id = "UUID",
@@ -2119,6 +2126,69 @@ describe("declarative config: flatten", function()
       ]]))
       local _, err = DeclarativeConfig:flatten(config)
       assert.equal(nil, err)
+    end)
+    it("fixes #7696 - incorrect foreign reference type produce useful error message", function()
+      local config = assert(lyaml.load([[
+        _format_version: "2.1"
+
+        services:
+        - name: my-service-1
+          url: http://localhost:8001/status
+          routes:
+          - name: my-route-1
+            service:
+              id: "769bdf51-16df-5476-9830-ef26800b5448"
+            paths:
+            - /status
+      ]]))
+      local _, err = DeclarativeConfig:flatten(config)
+      assert.same({
+        routes = {
+          ["my-route-1"] = { "invalid reference 'service: {\"id\":\"769bdf51-16df-5476-9830-ef26800b5448\"}' (no such entry in 'services')" }
+        }
+      }, err)
+    end)
+    it("fixes #7620 - yaml anchors work as expected", function()
+      local config = assert(lyaml.load([[
+        _format_version: "1.1"
+        services:
+          - name: service1
+            url: http://example.com
+            plugins:
+              - &correlation-plugin
+                name: correlation-id
+                config:
+                  header_name: X-Request-Id
+                  generator: uuid
+                  echo_downstream: true
+              - &rate-limiting-plugin
+                name: rate-limiting
+                config:
+                  second: 5
+                  policy: local
+            routes:
+              - name: foo
+                strip_path: false
+                paths:
+                  - /foo
+          - name: service2
+            url: http://example.com
+            plugins:
+              - *correlation-plugin
+              - *rate-limiting-plugin
+            routes:
+              - name: bar
+                strip_path: false
+                paths:
+                  - /bar
+      ]]))
+      local config, err = DeclarativeConfig:flatten(config)
+      assert.equal(nil, err)
+      local count = 0
+      for _, _ in pairs(config.plugins) do
+        count = count + 1
+      end
+      assert.equal(4, count)
     end)
   end)
 end)

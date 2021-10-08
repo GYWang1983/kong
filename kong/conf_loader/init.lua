@@ -587,6 +587,8 @@ local CONF_INFERENCES = {
 
   proxy_access_log = { typ = "string" },
   proxy_error_log = { typ = "string" },
+  proxy_stream_access_log = { typ = "string" },
+  proxy_stream_error_log = { typ = "string" },
   admin_access_log = { typ = "string" },
   admin_error_log = { typ = "string" },
   status_access_log = { typ = "string" },
@@ -611,6 +613,13 @@ local CONF_INFERENCES = {
 
   lua_ssl_trusted_certificate = { typ = "array" },
   lua_ssl_verify_depth = { typ = "number" },
+  lua_ssl_protocols = {
+    typ = "string",
+    directives = {
+      "nginx_http_lua_ssl_protocols",
+      "nginx_stream_lua_ssl_protocols",
+    },
+  },
   lua_socket_pool_size = { typ = "number" },
 
   role = { enum = { "data_plane", "control_plane", "traditional", }, },
@@ -621,6 +630,9 @@ local CONF_INFERENCES = {
   cluster_ca_cert = { typ = "string" },
   cluster_server_name = { typ = "string" },
   cluster_data_plane_purge_delay = { typ = "number" },
+  cluster_ocsp = { enum = { "on", "off", "optional" } },
+  cluster_v2 = { typ = "boolean", },
+
   kic = { typ = "boolean" },
   pluginserver_names = { typ = "array" },
 
@@ -953,12 +965,18 @@ local function check_and_infer(conf, opts)
   end
 
   if conf.dns_order then
-    local allowed = { LAST = true, A = true, CNAME = true, SRV = true }
+    local allowed = { LAST = true, A = true, CNAME = true,
+                      SRV = true, AAAA = true }
 
     for _, name in ipairs(conf.dns_order) do
       if not allowed[name:upper()] then
         errors[#errors + 1] = fmt("dns_order: invalid entry '%s'",
                                   tostring(name))
+      end
+      if name:upper() == "AAAA" then
+        log.warn("the 'dns_order' configuration property specifies the " ..
+                 "experimental IPv6 entry 'AAAA'")
+
       end
     end
   end
@@ -1041,6 +1059,17 @@ local function check_and_infer(conf, opts)
     if conf.database ~= "off" then
       errors[#errors + 1] = "only in-memory storage can be used when role = \"data_plane\"\n" ..
                             "Hint: set database = off in your kong.conf"
+    end
+
+    if not conf.lua_ssl_trusted_certificate then
+      conf.lua_ssl_trusted_certificate = {}
+    end
+
+    if conf.cluster_mtls == "shared" then
+      table.insert(conf.lua_ssl_trusted_certificate, conf.cluster_cert)
+
+    elseif conf.cluster_mtls == "pki" then
+      table.insert(conf.lua_ssl_trusted_certificate, conf.cluster_ca_cert)
     end
   end
 

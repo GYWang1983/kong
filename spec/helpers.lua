@@ -1,7 +1,7 @@
 ------------------------------------------------------------------
 -- Collection of utilities to help testing Kong features and plugins.
 --
--- @copyright Copyright 2016-2020 Kong Inc. All rights reserved.
+-- @copyright Copyright 2016-2021 Kong Inc. All rights reserved.
 -- @license [Apache 2.0](https://opensource.org/licenses/Apache-2.0)
 -- @module spec.helpers
 
@@ -10,6 +10,7 @@ local TEST_CONF_PATH = os.getenv("KONG_SPEC_TEST_CONF_PATH") or "spec/kong_tests
 local CUSTOM_PLUGIN_PATH = "./spec/fixtures/custom_plugins/?.lua"
 local DNS_MOCK_LUA_PATH = "./spec/fixtures/mocks/lua-resty-dns/?.lua"
 local GO_PLUGIN_PATH = "./spec/fixtures/go"
+local GRPC_TARGET_SRC_PATH = "./spec/fixtures/grpc/target/"
 local MOCK_UPSTREAM_PROTOCOL = "http"
 local MOCK_UPSTREAM_SSL_PROTOCOL = "https"
 local MOCK_UPSTREAM_HOST = "127.0.0.1"
@@ -54,7 +55,8 @@ local ssl = require "ngx.ssl"
 local ws_client = require "resty.websocket.client"
 local table_clone = require "table.clone"
 local https_server = require "spec.fixtures.https_server"
-
+local stress_generator = require "spec.fixtures.stress_generator"
+local resty_signal = require "resty.signal"
 
 ffi.cdef [[
   int setenv(const char *name, const char *value, int overwrite);
@@ -144,7 +146,7 @@ end
 
 
 --- Unset an environment variable
--- @function setenv
+-- @function unsetenv
 -- @param env (string) name of the environment variable
 -- @return true on success, false otherwise
 local function unsetenv(env)
@@ -166,7 +168,7 @@ local function make_yaml_file(content, filename)
     assert(fd:write("\n")) -- ensure last line ends in newline
     assert(fd:close())
   else
-    assert(kong_exec("config db_export "..filename))
+    assert(kong_exec("config db_export --conf "..TEST_CONF_PATH.." "..filename))
   end
   return filename
 end
@@ -465,7 +467,8 @@ end
 -----------------
 -- Custom helpers
 -----------------
-local resty_http_proxy_mt = {}
+local resty_http_proxy_mt = setmetatable({}, { __index = http })
+resty_http_proxy_mt.__index = resty_http_proxy_mt
 
 local pack = function(...) return { n = select("#", ...), ... } end
 local unpack = function(t) return unpack(t, 1, t.n) end
@@ -540,79 +543,6 @@ local function lookup(t, k)
   return nil, ok
 end
 
-
---- Waits until a specific condition is met.
--- The check function will repeatedly be called (with a fixed interval), until
--- the condition is met, or the
--- timeout value is exceeded.
--- @function wait_until
--- @param f check function that should return `truthy` when the condition has
--- been met
--- @param timeout (optional) maximum time to wait after which an error is
--- thrown, defaults to 5.
--- @return nothing. It returns when the condition is met, or throws an error
--- when it times out.
--- @usage -- wait 10 seconds for a file "myfilename" to appear
--- helpers.wait_until(function() return file_exist("myfilename") end, 10)
-local function wait_until(f, timeout, step)
-  if type(f) ~= "function" then
-    error("arg #1 must be a function", 2)
-  end
-
-  if timeout ~= nil and type(timeout) ~= "number" then
-    error("arg #2 must be a number", 2)
-  end
-
-  if step ~= nil and type(step) ~= "number" then
-    error("arg #3 must be a number", 2)
-  end
-
-  ngx.update_time()
-
-  timeout = timeout or 5
-  step = step or 0.05
-
-  local tstart = ngx.time()
-  local texp = tstart + timeout
-  local ok, res, err
-
-  repeat
-    ok, res, err = pcall(f)
-    ngx.sleep(step)
-    ngx.update_time()
-  until not ok or res or ngx.time() >= texp
-
-  if not ok then
-    -- report error from `f`, such as assert gone wrong
-    error(tostring(res), 2)
-  elseif not res and err then
-    -- report a failure for `f` to meet its condition
-    -- and eventually an error return value which could be the cause
-    error("wait_until() timeout: " .. tostring(err) .. " (after delay: " .. timeout .. "s)", 2)
-  elseif not res then
-    -- report a failure for `f` to meet its condition
-    error("wait_until() timeout (after delay " .. timeout .. "s)", 2)
-  end
-end
-
-
-local admin_client -- forward declaration
-
---- Waits for invalidation of a cached key by polling the mgt-api
--- and waiting for a 404 response.
--- @function wait_for_invalidation
--- @param key (string) the cache-key to check
--- @param timeout (optional) in seconds (for default see `wait_until`).
-local function wait_for_invalidation(key, timeout)
-  -- TODO: this code is not used, but is duplicated all over the codebase!
-  -- search codebase for "/cache/" endpoint
-  local api_client = admin_client()
-  wait_until(function()
-    local res = api_client:get("/cache/" .. key)
-    res:read_body()
-    return res.status == 404
-  end, timeout)
-end
 
 
 --- http_client.
@@ -732,13 +662,47 @@ for _, method_name in ipairs({"get", "post", "put", "patch", "delete"}) do
   end
 end
 
-function resty_http_proxy_mt:__index(k)
-  local f = rawget(resty_http_proxy_mt, k)
-  if f then
-    return f
+
+--- Creates a http client from options.
+-- Instead of using this client, you'll probably want to use the pre-configured
+-- clients available as `proxy_client`, `admin_client`, etc. because these come
+-- pre-configured and connected to the underlying Kong test instance.
+--
+-- @function http_client_opts
+-- @param options connection and other options
+-- @return http client
+-- @see http_client:send
+-- @see proxy_client
+-- @see proxy_ssl_client
+-- @see admin_client
+-- @see admin_ssl_client
+local function http_client_opts(options)
+  if not options.scheme then
+    options = utils.deep_copy(options)
+    options.scheme = "http"
+    if options.port == 443 then
+      options.scheme = "https"
+    else
+      options.scheme = "http"
+    end
   end
 
-  return self.client[k]
+  local self = setmetatable(assert(http.new()), resty_http_proxy_mt)
+  local _, err = self:connect(options)
+  if err then
+    error("Could not connect to " .. options.host or "unknown" .. ":" .. options.port or "unknown" .. ": " .. err)
+  end
+
+  if options.connect_timeout and
+     options.send_timeout    and
+     options.read_timeout
+  then
+    self:set_timeouts(options.connect_timeout, options.send_timeout, options.read_timeout)
+  else
+    self:set_timeout(options.timeout or 10000)
+  end
+
+  return self
 end
 
 
@@ -758,13 +722,15 @@ end
 -- @see admin_client
 -- @see admin_ssl_client
 local function http_client(host, port, timeout)
-  timeout = timeout or 10000
-  local client = assert(http.new())
-  assert(client:connect(host, port), "Could not connect to " .. host .. ":" .. port)
-  client:set_timeout(timeout)
-  return setmetatable({
-    client = client
-  }, resty_http_proxy_mt)
+  if type(host) == "table" then
+    return http_client_opts(host)
+  end
+
+  return http_client_opts({
+    host = host,
+    port = port,
+    timeout = timeout,
+  })
 end
 
 
@@ -801,11 +767,18 @@ end
 --- returns a pre-configured `http_client` for the Kong proxy port.
 -- @function proxy_client
 -- @param timeout (optional, number) the timeout to use
-local function proxy_client(timeout)
+-- @param forced_port (optional, number) if provided will override the port in
+-- the Kong configuration with this port
+local function proxy_client(timeout, forced_port)
   local proxy_ip = get_proxy_ip(false)
   local proxy_port = get_proxy_port(false)
   assert(proxy_ip, "No http-proxy found in the configuration")
-  return http_client(proxy_ip, proxy_port, timeout or 60000)
+  return http_client_opts({
+    scheme = "http",
+    host = proxy_ip,
+    port = forced_port or proxy_port,
+    timeout = timeout or 60000,
+  })
 end
 
 
@@ -817,9 +790,15 @@ local function proxy_ssl_client(timeout, sni)
   local proxy_ip = get_proxy_ip(true, true)
   local proxy_port = get_proxy_port(true, true)
   assert(proxy_ip, "No https-proxy found in the configuration")
-  local client = http_client(proxy_ip, proxy_port, timeout or 60000)
-  assert(client:ssl_handshake(nil, sni, false)) -- explicit no-verify
-  return client
+  local client = http_client_opts({
+    scheme = "https",
+    host = proxy_ip,
+    port = proxy_port,
+    timeout = timeout or 60000,
+    ssl_verify = false,
+    ssl_server_name = sni,
+  })
+    return client
 end
 
 
@@ -828,7 +807,7 @@ end
 -- @param timeout (optional, number) the timeout to use
 -- @param forced_port (optional, number) if provided will override the port in
 -- the Kong configuration with this port
-function admin_client(timeout, forced_port)
+local function admin_client(timeout, forced_port)
   local admin_ip, admin_port
   for _, entry in ipairs(conf.admin_listeners) do
     if entry.ssl == false then
@@ -837,7 +816,12 @@ function admin_client(timeout, forced_port)
     end
   end
   assert(admin_ip, "No http-admin found in the configuration")
-  return http_client(admin_ip, forced_port or admin_port, timeout or 60000)
+  return http_client_opts({
+    scheme = "http",
+    host = admin_ip,
+    port = forced_port or admin_port,
+    timeout = timeout or 60000
+  })
 end
 
 --- returns a pre-configured `http_client` for the Kong admin SSL port.
@@ -852,8 +836,12 @@ local function admin_ssl_client(timeout)
     end
   end
   assert(admin_ip, "No https-admin found in the configuration")
-  local client = http_client(admin_ip, admin_port, timeout or 60000)
-  assert(client:ssl_handshake())
+  local client = http_client_opts({
+    scheme = "https",
+    host = admin_ip,
+    port = admin_port,
+    timeout = timeout or 60000,
+  })
   return client
 end
 
@@ -1395,6 +1383,88 @@ local say = require "say"
 local luassert = require "luassert.assert"
 
 
+--- Waits until a specific condition is met.
+-- The check function will repeatedly be called (with a fixed interval), until
+-- the condition is met. Throws an error on timeout.
+--
+-- NOTE: this is a regular Lua function, not a Luassert assertion.
+-- @function wait_until
+-- @param f check function that should return `truthy` when the condition has
+-- been met
+-- @param timeout (optional) maximum time to wait after which an error is
+-- thrown, defaults to 5.
+-- @param step (optional) interval between checks, defaults to 0.05.
+-- @return nothing. It returns when the condition is met, or throws an error
+-- when it times out.
+-- @usage
+-- -- wait 10 seconds for a file "myfilename" to appear
+-- helpers.wait_until(function() return file_exist("myfilename") end, 10)
+local function wait_until(f, timeout, step)
+  if type(f) ~= "function" then
+    error("arg #1 must be a function", 2)
+  end
+
+  if timeout ~= nil and type(timeout) ~= "number" then
+    error("arg #2 must be a number", 2)
+  end
+
+  if step ~= nil and type(step) ~= "number" then
+    error("arg #3 must be a number", 2)
+  end
+
+  ngx.update_time()
+
+  timeout = timeout or 5
+  step = step or 0.05
+
+  local tstart = ngx.time()
+  local texp = tstart + timeout
+  local ok, res, err
+
+  repeat
+    ok, res, err = pcall(f)
+    ngx.sleep(step)
+    ngx.update_time()
+  until not ok or res or ngx.time() >= texp
+
+  if not ok then
+    -- report error from `f`, such as assert gone wrong
+    error(tostring(res), 2)
+  elseif not res and err then
+    -- report a failure for `f` to meet its condition
+    -- and eventually an error return value which could be the cause
+    error("wait_until() timeout: " .. tostring(err) .. " (after delay: " .. timeout .. "s)", 2)
+  elseif not res then
+    -- report a failure for `f` to meet its condition
+    error("wait_until() timeout (after delay " .. timeout .. "s)", 2)
+  end
+end
+
+
+--- Waits for invalidation of a cached key by polling the mgt-api
+-- and waiting for a 404 response. Throws an error on timeout.
+--
+-- NOTE: this is a regular Lua function, not a Luassert assertion.
+-- @function wait_for_invalidation
+-- @param key (string) the cache-key to check
+-- @param timeout (optional) in seconds (for default see `wait_until`).
+-- @return nothing. It returns when the key is invalidated, or throws an error
+-- when it times out.
+-- @usage
+-- local cache_key = "abc123"
+-- helpers.wait_for_invalidation(cache_key, 10)
+local function wait_for_invalidation(key, timeout)
+  -- TODO: this code is duplicated all over the codebase,
+  -- search codebase for "/cache/" endpoint
+  local api_client = admin_client()
+  wait_until(function()
+    local res = api_client:get("/cache/" .. key)
+    res:read_body()
+    return res.status == 404
+  end, timeout)
+end
+
+
 --- Generic modifier "response".
 -- Will set a "response" value in the assertion state, so following
 -- assertions will operate on the value set.
@@ -1528,6 +1598,42 @@ Expected to not contain:
 luassert:register("assertion", "contains", contains,
                   "assertion.contains.negative",
                   "assertion.contains.positive")
+
+local deep_sort do
+  local function deep_compare(a, b)
+    if a == nil then
+      a = ""
+    end
+
+    if b == nil then
+      b = ""
+    end
+
+    deep_sort(a)
+    deep_sort(b)
+
+    if type(a) ~= type(b) then
+      return type(a) < type(b)
+    end
+
+    if type(a) == "table" then
+      return deep_compare(a[1], b[1])
+    end
+
+    return a < b
+  end
+
+  function deep_sort(t)
+    if type(t) == "table" then
+      for _, v in pairs(t) do
+        deep_sort(v)
+      end
+      table.sort(t, deep_compare)
+    end
+
+    return t
+  end
+end
 
 
 --- Assertion to check the status-code of a http response.
@@ -1909,6 +2015,7 @@ do
   -- @param path A path to the log file (defaults to the test prefix's
   -- errlog).
   -- @see line
+  -- @see clean_logfile
   -- @usage
   -- assert.logfile("./my/logfile.log").has.no.line("[error]", true)
   local function modifier_errlog(state, args)
@@ -1938,7 +2045,12 @@ do
   -- @param fpath An optional path to the file (defaults to the filelog
   -- modifier)
   -- @see logfile
+  -- @see clean_logfile
   -- @usage
+  -- helpers.clean_logfile()
+  --
+  -- -- run some tests here
+  --
   -- assert.logfile().has.no.line("[error]", true)
   local function match_line(state, args)
     local regex = args[1]
@@ -2011,7 +2123,7 @@ end
 -- @usage
 -- -- Create a new DNS mock and add some DNS records
 -- local fixtures = {
---   dns_mock = helpers.dns_mock.new()
+--   dns_mock = helpers.dns_mock.new { mocks_only = true }
 -- }
 --
 -- fixtures.dns_mock:SRV {
@@ -2040,10 +2152,14 @@ do
   dns_mock.__index = dns_mock
   dns_mock.__tostring = function(self)
     -- fill array to prevent json encoding errors
+    local out = {
+      mocks_only = self.mocks_only,
+      records = {}
+    }
     for i = 1, 33 do
-      self[i] = self[i] or {}
+      out.records[i] = self[i] or {}
     end
-    local json = assert(cjson.encode(self))
+    local json = assert(cjson.encode(out))
     return json
   end
 
@@ -2052,10 +2168,17 @@ do
 
 
   --- Creates a new DNS mock.
+  -- The options table supports the following fields:
+  --
+  -- - `mocks_only`: boolean, if set to `true` then only mock records will be
+  --   returned. If `falsy` it will fall through to an actual DNS lookup.
   -- @function dns_mock.new
+  -- @param options table with mock options
   -- @return dns_mock object
-  function dns_mock.new()
-    return setmetatable({}, dns_mock)
+  -- @usage
+  -- local mock = helpers.dns_mock.new { mocks_only = true }
+  function dns_mock.new(options)
+    return setmetatable(options or {}, dns_mock)
   end
 
 
@@ -2360,11 +2483,24 @@ end
 -- It may differ from the default, as it may have been modified
 -- by the `env` table given to start_kong.
 -- @function get_running_conf
--- @param prefix The prefix path where the kong instance is running
+-- @param prefix (optional) The prefix path where the kong instance is running,
+-- defaults to the prefix in the default config.
 -- @return The conf table of the running instance, or nil + error.
 local function get_running_conf(prefix)
   local default_conf = conf_loader(nil, {prefix = prefix or conf.prefix})
   return conf_loader.load_config_file(default_conf.kong_env)
+end
+
+
+--- Clears the logfile. Will overwrite the logfile with an empty file.
+-- @function clean_logfile
+-- @param logfile (optional) filename to clear, defaults to the current
+-- error-log file
+-- @return nothing
+-- @see line
+local function clean_logfile(logfile)
+  logfile = logfile or (get_running_conf() or conf).nginx_err_logs
+  os.execute(":> " .. logfile)
 end
 
 
@@ -2428,15 +2564,87 @@ end
 
 
 local function build_go_plugins(path)
-  for _, plugin_path in ipairs(pl_dir.getfiles(path, "*.go")) do
-    local plugin_name = pl_path.basename(plugin_path):match("(.+).go")
-
-    local ok, _, _, stderr = pl_utils.executeex(
-      string.format("cd %s; go build -buildmode plugin -o %s %s",
-      path, plugin_name .. ".so", plugin_name .. ".go")
-    )
+  if pl_path.exists(pl_path.join(path, "go.mod")) then
+    local ok, _, _, stderr = pl_utils.executeex(string.format(
+            "cd %s; go mod tidy; go mod download", path))
     assert(ok, stderr)
   end
+  for _, go_source in ipairs(pl_dir.getfiles(path, "*.go")) do
+    local ok, _, _, stderr = pl_utils.executeex(string.format(
+            "cd %s; go build %s",
+            path, pl_path.basename(go_source)
+    ))
+    assert(ok, stderr)
+  end
+end
+
+local function isnewer(path_a, path_b)
+  if not pl_path.exists(path_a) then
+    return true
+  end
+  if not pl_path.exists(path_b) then
+    return false
+  end
+  return assert(pl_path.getmtime(path_b)) > assert(pl_path.getmtime(path_a))
+end
+
+local function make(workdir, specs)
+  workdir = pl_path.normpath(workdir or pl_path.currentdir())
+
+  for _, spec in ipairs(specs) do
+    local targetpath = pl_path.join(workdir, spec.target)
+    for _, src in ipairs(spec.src) do
+      local srcpath = pl_path.join(workdir, src)
+      if isnewer(targetpath, srcpath) then
+        local ok, _, _, stderr = pl_utils.executeex(string.format("cd %s; %s", workdir, spec.cmd))
+        assert(ok, stderr)
+        if isnewer(targetpath, srcpath) then
+          error(string.format("couldn't make %q newer than %q", targetpath, srcpath))
+        end
+        break
+      end
+    end
+  end
+
+  return true
+end
+
+local grpc_target_proc
+local function start_grpc_target()
+  local ngx_pipe = require "ngx.pipe"
+  assert(make(GRPC_TARGET_SRC_PATH, {
+    {
+      target = "targetservice/targetservice.pb.go",
+      src    = { "../targetservice.proto" },
+      cmd    = "protoc --go_out=. --go-grpc_out=. -I ../ ../targetservice.proto",
+    },
+    {
+      target = "targetservice/targetservice_grpc.pb.go",
+      src    = { "../targetservice.proto" },
+      cmd    = "protoc --go_out=. --go-grpc_out=. -I ../ ../targetservice.proto",
+    },
+    {
+      target = "target",
+      src    = { "grpc-target.go", "targetservice/targetservice.pb.go", "targetservice/targetservice_grpc.pb.go" },
+      cmd    = "go mod tidy && go mod download all && go build",
+    },
+  }))
+  grpc_target_proc = assert(ngx_pipe.spawn({ GRPC_TARGET_SRC_PATH .. "/target" }, {
+      merge_stderr = true,
+  }))
+
+  return true
+end
+
+local function stop_grpc_target()
+  if grpc_target_proc then
+    grpc_target_proc:kill(resty_signal.signum("QUIT"))
+    grpc_target_proc = nil
+  end
+end
+
+local function get_grpc_target_port()
+  return 15010
 end
 
 
@@ -2531,7 +2739,7 @@ local function start_kong(env, tables, preserve_prefix, fixtures)
     nginx_conf = " --nginx-conf " .. env.nginx_conf
   end
 
-  if dcbp and not env.declarative_config then
+  if dcbp and not env.declarative_config and not env.declarative_config_string then
     if not config_yml then
       config_yml = prefix .. "/config.yml"
       local cfg = dcbp.done()
@@ -2608,7 +2816,7 @@ end
 -- @param opts Options to use, the `host`, `port`, `cert` and `cert_key` fields
 -- are required.
 -- Other fields that can be overwritten are:
--- `node_hostname`, `node_id`, `node_version`. If absent,
+-- `node_hostname`, `node_id`, `node_version`, `node_plugins_list`. If absent,
 -- they are automatically filled.
 -- @return msg if handshake succeeded and initial message received from CP or nil, err
 local function clustering_client(opts)
@@ -2623,14 +2831,14 @@ local function clustering_client(opts)
               "&node_hostname=" .. (opts.node_hostname or kong.node.get_hostname()) ..
               "&node_version=" .. (opts.node_version or KONG_VERSION)
 
-  local opts = {
+  local conn_opts = {
     ssl_verify = false, -- needed for busted tests as CP certs are not trusted by the CLI
     client_cert = assert(ssl.parse_pem_cert(assert(pl_file.read(opts.cert)))),
     client_priv_key = assert(ssl.parse_pem_priv_key(assert(pl_file.read(opts.cert_key)))),
     server_name = "kong_clustering",
   }
 
-  local res, err = c:connect(uri, opts)
+  local res, err = c:connect(uri, conn_opts)
   if not res then
     return nil, err
   end
@@ -2638,13 +2846,12 @@ local function clustering_client(opts)
                                         plugins = opts.node_plugins_list or
                                                   PLUGINS_LIST,
                                       }))
-
   assert(c:send_binary(payload))
 
   assert(c:send_ping(string.rep("0", 32)))
 
-  local data, typ
-  data, typ = c:recv_frame()
+  local data, typ, err
+  data, typ, err = c:recv_frame()
   c:close()
 
   if typ == "binary" then
@@ -2656,7 +2863,7 @@ local function clustering_client(opts)
     return "PONG"
   end
 
-  return nil, "unknown frame from CP: " .. typ
+  return nil, "unknown frame from CP: " .. (typ or err)
 end
 
 
@@ -2759,12 +2966,14 @@ end
   admin_ssl_client = admin_ssl_client,
   prepare_prefix = prepare_prefix,
   clean_prefix = clean_prefix,
+  clean_logfile = clean_logfile,
   wait_for_invalidation = wait_for_invalidation,
   each_strategy = each_strategy,
   all_strategies = all_strategies,
   validate_plugin_config_schema = validate_plugin_config_schema,
   clustering_client = clustering_client,
   https_server = https_server,
+  stress_generator = stress_generator,
 
   -- miscellaneous
   intercept = intercept,
@@ -2773,11 +2982,16 @@ end
   make_yaml_file = make_yaml_file,
   setenv = setenv,
   unsetenv = unsetenv,
+  deep_sort = deep_sort,
 
   -- launching Kong subprocesses
   start_kong = start_kong,
   stop_kong = stop_kong,
   restart_kong = restart_kong,
+
+  start_grpc_target = start_grpc_target,
+  stop_grpc_target = stop_grpc_target,
+  get_grpc_target_port = get_grpc_target_port,
 
   -- Only use in CLI tests from spec/02-integration/01-cmd
   kill_all = function(prefix, timeout)
@@ -2838,11 +3052,17 @@ end
 
     return code
   end,
-
   -- returns the plugins and version list that is used by Hybrid mode tests
   get_plugins_list = function()
     assert(PLUGINS_LIST, "plugin list has not been initialized yet, " ..
                          "you must call get_db_utils first")
     return table_clone(PLUGINS_LIST)
+  end,
+  get_available_port = function()
+    local socket = require("socket")
+    local server = assert(socket.bind("*", 0))
+    local _, port = server:getsockname()
+    server:close()
+    return tonumber(port)
   end,
 }

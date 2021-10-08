@@ -28,6 +28,45 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
   end)
 
   describe("/", function()
+    it("returns headers with HEAD method", function()
+      local res1 = assert(client:send {
+        method = "GET",
+        path = "/"
+      })
+
+      local body = assert.res_status(200, res1)
+      assert.not_equal("", body)
+
+      local res2 = assert(client:send {
+        method = "HEAD",
+        path = "/"
+      })
+      local body = assert.res_status(200, res2)
+      assert.equal("", body)
+
+      res1.headers["Date"] = nil
+      res2.headers["Date"] = nil
+      res1.headers["X-Kong-Admin-Latency"] = nil
+      res2.headers["X-Kong-Admin-Latency"] = nil
+
+      assert.same(res1.headers, res2.headers)
+    end)
+
+    it("returns allow and CORS headers with OPTIONS method", function()
+      local res = assert(client:send {
+        method = "OPTIONS",
+        path = "/"
+      })
+
+      local body = assert.res_status(204, res)
+      assert.equal("", body)
+      assert.equal("GET, HEAD, OPTIONS", res.headers["Allow"])
+      assert.equal("GET, HEAD, OPTIONS", res.headers["Access-Control-Allow-Methods"])
+      assert.equal("Content-Type", res.headers["Access-Control-Allow-Headers"])
+      assert.equal("*", res.headers["Access-Control-Allow-Origin"])
+      assert.not_nil(res.headers["X-Kong-Admin-Latency"])
+    end)
+
     it("returns Kong's version number and tagline", function()
       local res = assert(client:send {
         method = "GET",
@@ -97,21 +136,30 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       assert.is_string(json.configuration.pg_password)
       assert.not_equal("hide_me", json.configuration.pg_password)
     end)
-    it("returns PRNG seeds", function()
+    it("returns process ids", function()
       local res = assert(client:send {
         method = "GET",
         path = "/",
       })
       local body = assert.response(res).has.status(200)
       local json = cjson.decode(body)
-      assert.is_table(json.prng_seeds)
-      for k in pairs(json.prng_seeds) do
-        assert.matches("pid: %d+", k)
-        assert.matches("%d+", k)
+      assert.is_table(json.pids)
+      assert.matches("%d+", json.pids.master)
+      for _, v in pairs(json.pids.workers) do
+        assert.matches("%d+", v)
       end
     end)
-  end)
 
+    it("does not return PRNG seeds", function()
+      local res = assert(client:send {
+        method = "GET",
+        path = "/",
+      })
+      local body = assert.response(res).has.status(200)
+      local json = cjson.decode(body)
+      assert.is_nil(json.prng_seeds)
+    end)
+  end)
 
   describe("/endpoints", function()
     it("only returns base, plugin, and custom-plugin endpoints", function()
@@ -137,7 +185,6 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       assert(find("/reports/send-ping"))                   -- Custom plugin "reports-api"
     end)
   end)
-
 
   describe("/status", function()
     it("returns status info", function()
@@ -376,7 +423,6 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
     end)
   end)
 
-
   describe("/schemas/:db_entity_name/validate", function()
     it("returns 200 on a valid schema", function()
       local res = assert(client:post("/schemas/services/validate", {
@@ -415,6 +461,62 @@ describe("Admin API - Kong routes with strategy #" .. strategy, function()
       local body = assert.res_status(400, res)
       local json = cjson.decode(body)
       assert.equal("schema violation", json.name)
+    end)
+  end)
+
+  describe("/non-existing", function()
+    it("returns 404 with HEAD", function()
+      local res = assert(client:send {
+        method = "HEAD",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      assert.equal("", body)
+    end)
+    it("returns 404 with OPTIONS", function()
+      local res = assert(client:send {
+        method = "OPTIONS",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
+    end)
+    it("returns 404 with GET", function()
+      local res = assert(client:send {
+        method = "GET",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
+    end)
+    it("returns 404 with POST", function()
+      local res = assert(client:send {
+        method = "POST",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
+    end)
+    it("returns 404 with PUT", function()
+      local res = assert(client:send {
+        method = "PUT",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
+    end)
+    it("returns 404 with DELETE", function()
+      local res = assert(client:send {
+        method = "DELETE",
+        path = "/non-existing"
+      })
+      local body = assert.res_status(404, res)
+      local json = cjson.decode(body)
+      assert.equal("Not found", json.message)
     end)
   end)
 end)

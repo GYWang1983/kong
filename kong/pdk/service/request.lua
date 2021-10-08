@@ -12,6 +12,7 @@ local ngx_var = ngx.var
 local table_insert = table.insert
 local table_sort = table.sort
 local table_concat = table.concat
+local type = type
 local string_find = string.find
 local string_sub = string.sub
 local string_lower = string.lower
@@ -20,6 +21,7 @@ local normalize_multi_header = checks.normalize_multi_header
 local validate_header = checks.validate_header
 local validate_headers = checks.validate_headers
 local check_phase = phase_checker.check
+local escape = require("kong.tools.uri").escape
 
 
 local PHASES = phase_checker.phases
@@ -27,12 +29,13 @@ local PHASES = phase_checker.phases
 
 local access_and_rewrite = phase_checker.new(PHASES.rewrite, PHASES.access)
 local preread_and_balancer = phase_checker.new(PHASES.preread, PHASES.balancer)
+local access_rewrite_balancer = phase_checker.new(PHASES.rewrite, PHASES.access, PHASES.balancer)
 
 
 ---
 -- Produce a lexicographically ordered querystring, given a table of values.
 --
--- @param args A table where keys are strings and values are strings, booleans,
+-- @tparam table args A table where keys are strings and values are strings, booleans,
 -- or an array of strings or booleans.
 -- @treturn string|nil an URL-encoded query string, or nil if an error ocurred
 -- @treturn string|nil and an error message if an error ocurred, or nil
@@ -118,11 +121,16 @@ local function new(self)
 
 
   ---
-  -- Sets the path component for the request to the service. It is not
-  -- normalized in any way and should **not** include the querystring.
+  -- Sets the path component for the request to the service.
+  --
+  -- The input accepts any valid *normalized* URI (including UTF-8 characters)
+  -- and this API will perform necessary escaping according to the RFC
+  -- to make the request valid.
+  --
+  -- Input should **not** include the querystring.
   -- @function kong.service.request.set_path
   -- @phases `access`
-  -- @param path The path string. Example: "/v2/movies"
+  -- @tparam string path The path string. Special characters and UTF-8 characters are allowed. Example: "/v2/movies" or "/foo/😀"
   -- @return Nothing; throws an error on invalid inputs.
   -- @usage
   -- kong.service.request.set_path("/v2/movies")
@@ -137,9 +145,7 @@ local function new(self)
       error("path must start with /", 2)
     end
 
-    -- TODO: is this necessary in specific phases?
-    -- ngx.req.set_uri(path)
-    ngx_var.upstream_uri = path
+    ngx_var.upstream_uri = escape(path)
   end
 
 
@@ -192,7 +198,7 @@ local function new(self)
     --
     -- @function kong.service.request.set_method
     -- @phases `rewrite`, `access`
-    -- @param method The method string, which should be given in all
+    -- @tparam string method The method string, which should be given in all
     -- uppercase. Supported values are: `"GET"`, `"HEAD"`, `"PUT"`, `"POST"`,
     -- `"DELETE"`, `"OPTIONS"`, `"MKCOL"`, `"COPY"`, `"MOVE"`, `"PROPFIND"`,
     -- `"PROPPATCH"`, `"LOCK"`, `"UNLOCK"`, `"PATCH"`, `"TRACE"`.
@@ -275,14 +281,14 @@ local function new(self)
   -- will also set the SNI of the request to the Service.
   --
   -- @function kong.service.request.set_header
-  -- @phases `rewrite`, `access`
+  -- @phases `rewrite`, `access`, `balancer`
   -- @tparam string header The header name. Example: "X-Foo"
   -- @tparam string|boolean|number value The header value. Example: "hello world"
   -- @return Nothing; throws an error on invalid inputs.
   -- @usage
   -- kong.service.request.set_header("X-Foo", "value")
   request.set_header = function(header, value)
-    check_phase(access_and_rewrite)
+    check_phase(access_rewrite_balancer)
 
     validate_header(header, value)
 
@@ -307,7 +313,7 @@ local function new(self)
   ---
   -- Adds a request header with the given value to the request to the Service. Unlike
   -- `kong.service.request.set_header()`, this function will not remove any existing
-  -- headers with the same name. Instead, several occurences of the header will be
+  -- headers with the same name. Instead, several occurrences of the header will be
   -- present in the request. The order in which headers are added is retained.
   --
   -- @function kong.service.request.add_header
@@ -520,7 +526,7 @@ local function new(self)
             end
             keys[i] = k
             i = i + 1
-            if string_find(v, boundary_check, 1, true) then
+            if string_find(tostring(v), boundary_check, 1, true) then
               boundary_ok = false
             end
           end

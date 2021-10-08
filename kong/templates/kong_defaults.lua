@@ -3,6 +3,8 @@ prefix = /usr/local/kong/
 log_level = notice
 proxy_access_log = logs/access.log
 proxy_error_log = logs/error.log
+proxy_stream_access_log = logs/access.log basic
+proxy_stream_error_log = logs/error.log
 admin_access_log = logs/admin_access.log
 admin_error_log = logs/error.log
 status_access_log = off
@@ -26,6 +28,9 @@ cluster_mtls = shared
 cluster_ca_cert = NONE
 cluster_server_name = NONE
 cluster_data_plane_purge_delay = 1209600
+cluster_ocsp = off
+cluster_v2 = off
+
 mem_cache_size = 128m
 ssl_cert = NONE
 ssl_cert_key = NONE
@@ -83,6 +88,7 @@ nginx_upstream_keepalive_timeout = NONE
 nginx_http_upstream_keepalive = NONE
 nginx_http_upstream_keepalive_requests = NONE
 nginx_http_upstream_keepalive_timeout = NONE
+nginx_http_lua_regex_match_limit = 100000
 
 client_max_body_size = 0
 client_body_buffer_size = 8k
@@ -135,6 +141,7 @@ cassandra_data_centers = dc1:2,dc2:3
 cassandra_schema_consensus_timeout = 10000
 
 declarative_config = NONE
+declarative_config_string = NONE
 
 db_update_frequency = 5
 db_update_propagation = 0
@@ -158,6 +165,7 @@ worker_state_update_frequency = 5
 lua_socket_pool_size = 30
 lua_ssl_trusted_certificate = NONE
 lua_ssl_verify_depth = 1
+lua_ssl_protocols = TLSv1.1 TLSv1.2 TLSv1.3
 lua_package_path = ./?.lua;./?/init.lua;
 lua_package_cpath = NONE
 

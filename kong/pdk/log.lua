@@ -44,6 +44,7 @@ local phases_with_ctx =
     phase_checker.new(PHASES.rewrite,
                       PHASES.access,
                       PHASES.header_filter,
+                      PHASES.response,
                       PHASES.body_filter,
                       PHASES_LOG)
 local _LEVELS = {
@@ -221,7 +222,7 @@ local serializers = {
 -- ```
 --
 -- @function kong.log
--- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+-- @phases init_worker, certificate, rewrite, access, header_filter, response, body_filter, log
 -- @param ... all params will be concatenated and stringified before being sent to the log
 -- @return Nothing; throws an error on invalid inputs.
 --
@@ -261,7 +262,7 @@ local serializers = {
 -- ```
 --
 -- @function kong.log.LEVEL
--- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+-- @phases init_worker, certificate, rewrite, access, header_filter, response, body_filter, log
 -- @param ... all params will be concatenated and stringified before being sent to the log
 -- @return Nothing; throws an error on invalid inputs.
 -- @usage
@@ -329,36 +330,102 @@ local function gen_log_func(lvl_const, imm_buf, to_string, stack_level, sep)
       local fullmsg_len = #fullmsg
       local WRAP = 120
 
-      if fullmsg:find("\n", 1, true) or fullmsg_len > WRAP then
-        local i = 1
+      local i = fullmsg:find("\n") + 1
+      local header = fullmsg:sub(1, i - 2) .. ("-"):rep(WRAP - i + 3) .. "+"
 
-        errlog.raw_log(lvl_const, "+" .. ("-"):rep(WRAP) .. "+")
+      errlog.raw_log(lvl_const, header)
 
-        while i <= fullmsg_len do
-          local part = string.sub(fullmsg, i, i + WRAP - 1)
-          local nl = part:match("()\n")
+      while i <= fullmsg_len do
+        local part = string.sub(fullmsg, i, i + WRAP - 1)
+        local nl = part:match("()\n")
 
-          if nl then
-            part = string.sub(fullmsg, i, i + nl - 2)
-            i = i + nl
+        if nl then
+          part = string.sub(fullmsg, i, i + nl - 2)
+          i = i + nl
 
-          else
-            i = i + WRAP
-          end
-
-          part = part .. (" "):rep(WRAP - #part)
-          errlog.raw_log(lvl_const, "|" .. part .. "|")
-
-          if i > fullmsg_len then
-            errlog.raw_log(lvl_const, "+" .. ("-"):rep(WRAP) .. "+")
-          end
+        else
+          i = i + WRAP
         end
 
-        return
+        part = part .. (" "):rep(WRAP - #part)
+        errlog.raw_log(lvl_const, "|" .. part .. "|")
+
+        if i > fullmsg_len then
+          errlog.raw_log(lvl_const, "+" .. ("-"):rep(WRAP) .. "+")
+        end
       end
+
+      return
     end
 
     errlog.raw_log(lvl_const, fullmsg)
+  end
+end
+
+
+--- Write a deprecation log line (similar to `kong.log.warn`).
+--
+-- Arguments given to this function can be of any type, but table arguments
+-- will be converted to strings via `tostring` (thus potentially calling a
+-- table's `__tostring` metamethod if set). When the last argument is a table,
+-- it is considered as a deprecation metadata. The table can include following
+-- properties:
+--
+-- ``` lua
+-- {
+--   after = "2.5.0",   -- deprecated after Kong version 2.5.0 (defaults to `nil`)
+--   removal = "3.0.0", -- about to be removed with Kong version 3.0.0 (defaults to `nil`)
+--   trace = true,      -- writes stack trace along with the deprecation message (defaults to `nil`)
+-- }
+-- ```
+--
+-- For example, the following call:
+--
+-- ``` lua
+-- kong.log.deprecation("hello ", "world")
+-- ```
+--
+-- would, within the core, produce a log line similar to:
+--
+-- ``` plain
+-- 2017/07/09 19:36:25 [warn] 25932#0: *1 [kong] some_file.lua:54 hello world, client: 127.0.0.1, server: localhost, request: "GET /log HTTP/1.1", host: "localhost"
+-- ```
+--
+-- If invoked from within a plugin (e.g. `key-auth`) it would include the
+-- namespace prefix, like so:
+--
+-- ``` plain
+-- 2017/07/09 19:36:25 [warn] 25932#0: *1 [kong] some_file.lua:54 [key-auth] hello world, client: 127.0.0.1, server: localhost, request: "GET /log HTTP/1.1", host: "localhost"
+-- ```
+--
+-- And with metatable, the following call:
+--
+-- ``` lua
+-- kong.log.deprecation("hello ", "world", { after = "2.5.0", removal = "3.0.0" })
+-- ```
+--
+-- would, within the core, produce a log line similar to:
+--
+-- ``` plain
+-- 2017/07/09 19:36:25 [warn] 25932#0: *1 [kong] some_file.lua:54 hello world (deprecated after 2.5.0, scheduled for removal in 3.0.0), client: 127.0.0.1, server: localhost, request: "GET /log HTTP/1.1", host: "localhost"
+-- ```
+--
+-- @function kong.log.deprecation
+-- @phases init_worker, certificate, rewrite, access, header_filter, response, body_filter, log
+-- @param ... all params will be concatenated and stringified before being sent to the log
+--            (if the last param is a table, it is considered as a deprecation metadata)
+-- @return Nothing; throws an error on invalid inputs.
+--
+-- @usage
+-- kong.log.deprecation("hello ", "world")
+-- kong.log.deprecation("hello ", "world", { after = "2.5.0" })
+-- kong.log.deprecation("hello ", "world", { removal = "3.0.0" })
+-- kong.log.deprecation("hello ", "world", { after = "2.5.0", removal = "3.0.0" })
+-- kong.log.deprecation("hello ", "world", { trace = true })
+local new_deprecation do
+  local mt = getmetatable(require("kong.deprecation"))
+  new_deprecation = function(write)
+    return setmetatable({ write = write }, mt)
   end
 end
 
@@ -368,10 +435,6 @@ end
 -- and accepts any number of arguments as well. If inspect logging is disabled
 -- via `kong.log.inspect.off()`, then this function prints nothing, and is
 -- aliased to a "NOP" function in order to save CPU cycles.
---
--- ``` lua
--- kong.log.inspect("...")
--- ```
 --
 -- This function differs from `kong.log()` in the sense that arguments will be
 -- concatenated with a space(`" "`), and each argument will be
@@ -407,7 +470,7 @@ end
 -- library to pretty-print its arguments.
 --
 -- @function kong.log.inspect
--- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+-- @phases init_worker, certificate, rewrite, access, header_filter, response, body_filter, log
 -- @param ... Parameters will be concatenated with spaces between them and
 -- rendered as described
 -- @usage
@@ -415,8 +478,6 @@ end
 local new_inspect
 
 do
-  local _INSPECT_FORMAT = _PREFIX .. "%file_src:%func_name:%line_src %message"
-  local inspect_buf = assert(parse_modifiers(_INSPECT_FORMAT))
   local function nop() end
 
 
@@ -427,7 +488,10 @@ do
   }
 
 
-  new_inspect = function(format)
+  new_inspect = function(namespace)
+    local _INSPECT_FORMAT = _PREFIX .. "%file_src:%func_name:%line_src ["..namespace.."]\n%message"
+    local inspect_buf = assert(parse_modifiers(_INSPECT_FORMAT))
+
     local self = {}
 
 
@@ -437,11 +501,11 @@ do
     -- formatting of arguments.
     --
     -- @function kong.log.inspect.on
-    -- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+    -- @phases init_worker, certificate, rewrite, access, header_filter, response, body_filter, log
     -- @usage
     -- kong.log.inspect.on()
     function self.on()
-      self.print = gen_log_func(_LEVELS.notice, inspect_buf, inspect, 3, " ")
+      self.print = gen_log_func(_LEVELS.debug, inspect_buf, inspect, 3, " ")
     end
 
 
@@ -450,7 +514,7 @@ do
     -- `kong.log.inspect()` will be nopped.
     --
     -- @function kong.log.inspect.off
-    -- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+    -- @phases init_worker, certificate, rewrite, access, header_filter, response, body_filter, log
     -- @usage
     -- kong.log.inspect.off()
     function self.off()
@@ -499,7 +563,7 @@ end
 -- phase in most real-usage cases.
 --
 -- @function kong.log.set_serialize_value
--- @phases certificate, rewrite, access, header_filter, body_filter, log
+-- @phases certificate, rewrite, access, header_filter, response, body_filter, log
 -- @tparam string key the name of the field.
 -- @tparam number|string|boolean|table value value to be set. When a table is used, its keys must be numbers, strings, booleans, and its values can be numbers, strings or other tables like itself, recursively.
 -- @tparam table options can contain two entries: options.mode can be `set` (the default, always sets), `add` (only add if entry does not already exist) and `replace` (only change value if it already exists).
@@ -737,10 +801,8 @@ do
         },
         tries = (ctx.balancer_data or {}).tries,
         latencies = {
-          kong = (ctx.KONG_ACCESS_TIME or 0) +
-                 (ctx.KONG_RECEIVE_TIME or 0) +
-                 (ctx.KONG_REWRITE_TIME or 0) +
-                 (ctx.KONG_BALANCER_TIME or 0),
+          kong = (ctx.KONG_PROXY_LATENCY or ctx.KONG_RESPONSE_LATENCY or 0) +
+                 (ctx.KONG_RECEIVE_TIME or 0),
           proxy = ctx.KONG_WAITING_TIME or -1,
           request = var.request_time * 1000
         },
@@ -749,7 +811,7 @@ do
         service = ctx.service,
         consumer = ctx.authenticated_consumer,
         client_ip = var.remote_addr,
-        started_at = req.start_time() * 1000
+        started_at = ctx.KONG_PROCESSING_START or (req.start_time() * 1000)
       })
     end
 
@@ -777,7 +839,7 @@ do
         session_tls = {
           version = session_tls_ver,
           cipher = var.ssl_cipher,
-          client_verify = ngx.ctx.CLIENT_VERIFY_OVERRIDE or var.ssl_client_verify,
+          client_verify = ctx.CLIENT_VERIFY_OVERRIDE or var.ssl_client_verify,
         }
       end
 
@@ -797,8 +859,7 @@ do
         },
         tries = (ctx.balancer_data or {}).tries,
         latencies = {
-          kong = (ctx.KONG_PREREAD_TIME or 0) +
-                 (ctx.KONG_BALANCER_TIME or 0),
+          kong = ctx.KONG_PROXY_LATENCY or ctx.KONG_RESPONSE_LATENCY or 0,
           session = var.session_time * 1000,
         },
         authenticated_entity = authenticated_entity,
@@ -806,7 +867,7 @@ do
         service = ctx.service,
         consumer = ctx.authenticated_consumer,
         client_ip = var.remote_addr,
-        started_at = req.start_time() * 1000
+        started_at = ctx.KONG_PROCESSING_START or (req.start_time() * 1000)
       })
     end
   end
@@ -854,12 +915,13 @@ local function new_log(namespace, format)
     for log_lvl_name, log_lvl in pairs(_LEVELS) do
       self[log_lvl_name] = gen_log_func(log_lvl, buf)
     end
-  end
 
+    self.deprecation = new_deprecation(gen_log_func(_LEVELS.warn, buf, nil, 5))
+  end
 
   self.set_format(format)
 
-  self.inspect = new_inspect(format)
+  self.inspect = new_inspect(namespace)
 
   self.set_serialize_value = set_serialize_value
   self.serialize = serialize

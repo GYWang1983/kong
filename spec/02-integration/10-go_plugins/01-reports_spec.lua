@@ -50,15 +50,17 @@ for _, strategy in helpers.each_strategy() do
         config = {}
       })
 
+      local kong_prefix = helpers.test_conf.prefix
+
       assert(helpers.start_kong({
         nginx_conf = "spec/fixtures/custom_nginx.template",
         database = strategy,
         dns_hostsfile = dns_hostsfile,
         plugins = "bundled,reports-api,go-hello",
         pluginserver_names = "test",
-        pluginserver_test_socket = "/tmp/go_pluginserver.sock",
-        pluginserver_test_query_cmd = "go-pluginserver -plugins-directory " .. helpers.go_plugin_path .. " -dump-all-plugins",
-        pluginserver_test_start_cmd = "go-pluginserver -plugins-directory " .. helpers.go_plugin_path .. " -kong-prefix /tmp",
+        pluginserver_test_socket = kong_prefix .. "/go-hello.socket",
+        pluginserver_test_query_cmd = "./spec/fixtures/go/go-hello -dump -kong-prefix " .. kong_prefix,
+        pluginserver_test_start_cmd = "./spec/fixtures/go/go-hello -kong-prefix " .. kong_prefix,
         anonymous_reports = true,
       }))
 
@@ -125,7 +127,7 @@ for _, strategy in helpers.each_strategy() do
         headers = { host  = "http-service.test" }
       })
       assert.res_status(200, res)
-      assert.equal("got from server 'openresty'", res.headers['x-hello-from-go-at-response'])
+      assert.equal("got from server 'mock-upstream/1.0.0'", res.headers['x-hello-from-go-at-response'])
 
     end)
 

@@ -42,9 +42,9 @@ return {
                                      default = 426, required = true,
                                    }, },
     { regex_priority = { type = "integer", default = 0 }, },
-    { strip_path     = { type = "boolean", default = true }, },
+    { strip_path     = { type = "boolean", required = true, default = true }, },
     { path_handling  = { type = "string", default = "v0", one_of = { "v0", "v1" }, }, },
-    { preserve_host  = { type = "boolean", default = false }, },
+    { preserve_host  = { type = "boolean", required = true, default = false }, },
     { request_buffering  = { type = "boolean", required = true, default = true }, },
     { response_buffering  = { type = "boolean", required = true, default = true }, },
     { snis = { type = "set",
@@ -62,5 +62,5 @@ return {
                       then_match = { len_eq = 0 },
                       then_err = "'snis' can only be set when 'protocols' is 'grpcs', 'https' or 'tls'",
                     }},
-                  }
+                  },
 }

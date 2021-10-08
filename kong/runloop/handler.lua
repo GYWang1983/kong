@@ -1,6 +1,5 @@
 -- Kong runloop
 
-local ck           = require "resty.cookie"
 local meta         = require "kong.meta"
 local utils        = require "kong.tools.utils"
 local Router       = require "kong.router"
@@ -10,6 +9,8 @@ local constants    = require "kong.constants"
 local singletons   = require "kong.singletons"
 local certificate  = require "kong.runloop.certificate"
 local concurrency  = require "kong.concurrency"
+local declarative  = require "kong.db.declarative"
+local workspaces   = require "kong.workspaces"
 local PluginsIterator = require "kong.runloop.plugins_iterator"
 
 
@@ -29,13 +30,16 @@ local ngx          = ngx
 local var          = ngx.var
 local log          = ngx.log
 local exit         = ngx.exit
+local exec         = ngx.exec
 local null         = ngx.null
 local header       = ngx.header
 local timer_at     = ngx.timer.at
 local timer_every  = ngx.timer.every
 local subsystem    = ngx.config.subsystem
 local clear_header = ngx.req.clear_header
+local http_version = ngx.req.http_version
 local unpack       = unpack
+local escape       = require("kong.tools.uri").escape
 
 
 local NOOP = function() end
@@ -55,14 +59,11 @@ local HOST_PORTS = {}
 
 
 local SUBSYSTEMS = constants.PROTOCOLS_WITH_SUBSYSTEM
-local EMPTY_T = {}
 local TTL_ZERO = { ttl = 0 }
 
 
 local ROUTER_SYNC_OPTS
-local ROUTER_ASYNC_OPTS
 local PLUGINS_ITERATOR_SYNC_OPTS
-local PLUGINS_ITERATOR_ASYNC_OPTS
 local FLIP_CONFIG_OPTS
 local GLOBAL_QUERY_OPTS = { workspace = null, show_ws_id = true }
 
@@ -81,6 +82,7 @@ local _set_update_router
 local _set_build_router
 local _set_router
 local _set_router_version
+local _register_balancer_events
 
 
 local update_lua_mem
@@ -171,12 +173,192 @@ local function csv(s)
 end
 
 
+local function register_balancer_events(core_cache, worker_events, cluster_events)
+  -- target updates
+
+
+  -- worker_events local handler: event received from DAO
+  worker_events.register(function(data)
+    local operation = data.operation
+    local target = data.entity
+    -- => to worker_events node handler
+    local ok, err = worker_events.post("balancer", "targets", {
+        operation = data.operation,
+        entity = data.entity,
+      })
+    if not ok then
+      log(ERR, "failed broadcasting target ",
+        operation, " to workers: ", err)
+    end
+    -- => to cluster_events handler
+    local key = fmt("%s:%s", operation, target.upstream.id)
+    ok, err = cluster_events:broadcast("balancer:targets", key)
+    if not ok then
+      log(ERR, "failed broadcasting target ", operation, " to cluster: ", err)
+    end
+  end, "crud", "targets")
+
+
+  -- worker_events node handler
+  worker_events.register(function(data)
+    local operation = data.operation
+    local target = data.entity
+
+    -- => to balancer update
+    balancer.on_target_event(operation, target)
+  end, "balancer", "targets")
+
+
+  -- cluster_events handler
+  cluster_events:subscribe("balancer:targets", function(data)
+    local operation, key = unpack(utils.split(data, ":"))
+    local entity
+    if key ~= "all" then
+      entity = {
+        upstream = { id = key },
+      }
+    else
+      entity = "all"
+    end
+    -- => to worker_events node handler
+    local ok, err = worker_events.post("balancer", "targets", {
+        operation = operation,
+        entity = entity
+      })
+    if not ok then
+      log(ERR, "failed broadcasting target ", operation, " to workers: ", err)
+    end
+  end)
+
+
+  -- manual health updates
+  cluster_events:subscribe("balancer:post_health", function(data)
+    local pattern = "([^|]+)|([^|]*)|([^|]+)|([^|]+)|([^|]+)|(.*)"
+    local hostname, ip, port, health, id, name = data:match(pattern)
+    port = tonumber(port)
+    local upstream = { id = id, name = name }
+    if ip == "" then
+      ip = nil
+    end
+    local _, err = balancer.post_health(upstream, hostname, ip, port, health == "1")
+    if err then
+      log(ERR, "failed posting health of ", name, " to workers: ", err)
+    end
+  end)
+
+
+  -- upstream updates
+
+
+  -- worker_events local handler: event received from DAO
+  worker_events.register(function(data)
+    local operation = data.operation
+    local upstream = data.entity
+    local ws_id = workspaces.get_workspace_id()
+    if not data.entity.ws_id then
+      log(DEBUG, "Event crud ", operation, " for upstream ", upstream.id,
+          " received without ws_id, adding.")
+      data.entity.ws_id = ws_id
+    end
+    -- => to worker_events node handler
+    local ok, err = worker_events.post("balancer", "upstreams", {
+        operation = data.operation,
+        entity = data.entity,
+      })
+    if not ok then
+      log(ERR, "failed broadcasting upstream ",
+        operation, " to workers: ", err)
+    end
+    -- => to cluster_events handler
+    local key = fmt("%s:%s:%s:%s", operation, data.entity.ws_id, upstream.id, upstream.name)
+    local ok, err = cluster_events:broadcast("balancer:upstreams", key)
+    if not ok then
+      log(ERR, "failed broadcasting upstream ", operation, " to cluster: ", err)
+    end
+  end, "crud", "upstreams")
+
+
+  -- worker_events node handler
+  worker_events.register(function(data)
+    local operation = data.operation
+    local upstream = data.entity
+
+    if not data.entity.ws_id then
+      log(CRIT, "Operation ", operation, " for upstream ", data.entity.id,
+          " received without workspace, discarding.")
+      return
+    end
+
+    singletons.core_cache:invalidate_local("balancer:upstreams")
+    singletons.core_cache:invalidate_local("balancer:upstreams:" .. upstream.id)
+
+    -- => to balancer update
+    balancer.on_upstream_event(operation, upstream)
+  end, "balancer", "upstreams")
+
+
+  cluster_events:subscribe("balancer:upstreams", function(data)
+    local operation, ws_id, id, name = unpack(utils.split(data, ":"))
+    local entity = {
+      id = id,
+      name = name,
+      ws_id = ws_id,
+    }
+    -- => to worker_events node handler
+    local ok, err = worker_events.post("balancer", "upstreams", {
+        operation = operation,
+        entity = entity
+      })
+    if not ok then
+      log(ERR, "failed broadcasting upstream ", operation, " to workers: ", err)
+    end
+  end)
+end
+
+
 local function register_events()
   -- initialize local local_events hooks
   local db             = kong.db
   local core_cache     = kong.core_cache
   local worker_events  = kong.worker_events
   local cluster_events = kong.cluster_events
+
+  if db.strategy == "off" then
+
+    -- declarative config updates
+
+    worker_events.register(function(default_ws)
+      if ngx.worker.exiting() then
+        log(NOTICE, "declarative flip config canceled: process exiting")
+        return true
+      end
+
+      local ok, err = concurrency.with_coroutine_mutex(FLIP_CONFIG_OPTS, function()
+        balancer.stop_healthcheckers()
+
+        kong.cache:flip()
+        core_cache:flip()
+
+        kong.default_workspace = default_ws
+        ngx.ctx.workspace = kong.default_workspace
+
+        rebuild_plugins_iterator(PLUGINS_ITERATOR_SYNC_OPTS)
+        rebuild_router(ROUTER_SYNC_OPTS)
+
+        balancer.init()
+
+        declarative.lock()
+
+        return true
+      end)
+
+      if not ok then
+        log(ERR, "config flip failed: ", err)
+      end
+    end, "declarative", "flip_config")
+
+    return
+  end
 
 
   -- events dispatcher
@@ -305,164 +487,8 @@ local function register_events()
   end, "crud", "certificates")
 
 
-  -- target updates
-
-
-  -- worker_events local handler: event received from DAO
-  worker_events.register(function(data)
-    local operation = data.operation
-    local target = data.entity
-    -- => to worker_events node handler
-    local ok, err = worker_events.post("balancer", "targets", {
-        operation = data.operation,
-        entity = data.entity,
-      })
-    if not ok then
-      log(ERR, "failed broadcasting target ",
-        operation, " to workers: ", err)
-    end
-    -- => to cluster_events handler
-    local key = fmt("%s:%s", operation, target.upstream.id)
-    ok, err = cluster_events:broadcast("balancer:targets", key)
-    if not ok then
-      log(ERR, "failed broadcasting target ", operation, " to cluster: ", err)
-    end
-  end, "crud", "targets")
-
-
-  -- worker_events node handler
-  worker_events.register(function(data)
-    local operation = data.operation
-    local target = data.entity
-
-    -- => to balancer update
-    balancer.on_target_event(operation, target)
-  end, "balancer", "targets")
-
-
-  -- cluster_events handler
-  cluster_events:subscribe("balancer:targets", function(data)
-    local operation, key = unpack(utils.split(data, ":"))
-    local entity
-    if key ~= "all" then
-      entity = {
-        upstream = { id = key },
-      }
-    else
-      entity = "all"
-    end
-    -- => to worker_events node handler
-    local ok, err = worker_events.post("balancer", "targets", {
-        operation = operation,
-        entity = entity
-      })
-    if not ok then
-      log(ERR, "failed broadcasting target ", operation, " to workers: ", err)
-    end
-  end)
-
-
-  -- manual health updates
-  cluster_events:subscribe("balancer:post_health", function(data)
-    local pattern = "([^|]+)|([^|]*)|([^|]+)|([^|]+)|([^|]+)|(.*)"
-    local hostname, ip, port, health, id, name = data:match(pattern)
-    port = tonumber(port)
-    local upstream = { id = id, name = name }
-    if ip == "" then
-      ip = nil
-    end
-    local _, err = balancer.post_health(upstream, hostname, ip, port, health == "1")
-    if err then
-      log(ERR, "failed posting health of ", name, " to workers: ", err)
-    end
-  end)
-
-
-  -- upstream updates
-
-
-  -- worker_events local handler: event received from DAO
-  worker_events.register(function(data)
-    local operation = data.operation
-    local upstream = data.entity
-    -- => to worker_events node handler
-    local ok, err = worker_events.post("balancer", "upstreams", {
-        operation = data.operation,
-        entity = data.entity,
-      })
-    if not ok then
-      log(ERR, "failed broadcasting upstream ",
-        operation, " to workers: ", err)
-    end
-    -- => to cluster_events handler
-    local key = fmt("%s:%s:%s", operation, upstream.id, upstream.name)
-    local ok, err = cluster_events:broadcast("balancer:upstreams", key)
-    if not ok then
-      log(ERR, "failed broadcasting upstream ", operation, " to cluster: ", err)
-    end
-  end, "crud", "upstreams")
-
-
-  -- worker_events node handler
-  worker_events.register(function(data)
-    local operation = data.operation
-    local upstream = data.entity
-
-    -- => to balancer update
-    balancer.on_upstream_event(operation, upstream)
-  end, "balancer", "upstreams")
-
-
-  cluster_events:subscribe("balancer:upstreams", function(data)
-    local operation, id, name = unpack(utils.split(data, ":"))
-    local entity = {
-      id = id,
-      name = name,
-    }
-    -- => to worker_events node handler
-    local ok, err = worker_events.post("balancer", "upstreams", {
-        operation = operation,
-        entity = entity
-      })
-    if not ok then
-      log(ERR, "failed broadcasting upstream ", operation, " to workers: ", err)
-    end
-  end)
-
-
-  -- declarative config updates
-
-
-  if db.strategy == "off" then
-    worker_events.register(function(default_ws)
-      if ngx.worker.exiting() then
-        log(NOTICE, "declarative flip config canceled: process exiting")
-        return true
-      end
-
-      local ok, err = concurrency.with_coroutine_mutex(FLIP_CONFIG_OPTS, function()
-        balancer.stop_healthcheckers()
-
-        kong.cache:flip()
-        core_cache:flip()
-
-        kong.default_workspace = default_ws
-        ngx.ctx.workspace = kong.default_workspace
-
-        rebuild_plugins_iterator(PLUGINS_ITERATOR_SYNC_OPTS)
-        rebuild_router(ROUTER_SYNC_OPTS)
-
-        balancer.init()
-
-        ngx.shared.kong:incr(constants.DECLARATIVE_FLIPS.name, 1, 0, constants.DECLARATIVE_FLIPS.ttl)
-
-        return true
-      end)
-
-      if not ok then
-        log(ERR, "config flip failed: ", err)
-      end
-    end, "declarative", "flip_config")
+  if kong.configuration.role ~= "control_plane" then
+    register_balancer_events(core_cache, worker_events, cluster_events)
   end
 end
 
@@ -793,6 +819,11 @@ do
   _set_router_version = function(v)
     router_version = v
   end
+
+  -- for tests only
+  _register_balancer_events = function(f)
+    register_balancer_events = f
+  end
 end
 
 
@@ -804,30 +835,39 @@ do
 
   function balancer_prepare(ctx, scheme, host_type, host, port,
                             service, route)
+    local retries
+    local connect_timeout
+    local send_timeout
+    local read_timeout
+
+    if service then
+      retries         = service.retries
+      connect_timeout = service.connect_timeout
+      send_timeout    = service.write_timeout
+      read_timeout    = service.read_timeout
+    end
+
     local balancer_data = {
-      scheme         = scheme,    -- scheme for balancer: http, https
-      type           = host_type, -- type of 'host': ipv4, ipv6, name
-      host           = host,      -- target host per `service` entity
-      port           = port,      -- final target port
-      try_count      = 0,         -- retry counter
+      scheme             = scheme,    -- scheme for balancer: http, https
+      type               = host_type, -- type of 'host': ipv4, ipv6, name
+      host               = host,      -- target host per `service` entity
+      port               = port,      -- final target port
+      try_count          = 0,         -- retry counter
+
+      retries            = retries         or 5,
+      connect_timeout    = connect_timeout or 60000,
+      send_timeout       = send_timeout    or 60000,
+      read_timeout       = read_timeout    or 60000,
+
       -- stores info per try, metatable is needed for basic log serializer
       -- see #6390
-      tries          = setmetatable({}, ARRAY_MT),
-      -- ip          = nil,       -- final target IP address
-      -- balancer    = nil,       -- the balancer object, if any
-      -- hostname    = nil,       -- hostname of the final target IP
-      -- hash_cookie = nil,       -- if Upstream sets hash_on_cookie
-      -- balancer_handle = nil,   -- balancer handle for the current connection
+      tries              = setmetatable({}, ARRAY_MT),
+      -- ip              = nil,       -- final target IP address
+      -- balancer        = nil,       -- the balancer object, if any
+      -- hostname        = nil,       -- hostname of the final target IP
+      -- hash_cookie     = nil,       -- if Upstream sets hash_on_cookie
+      -- balancer_handle = nil,       -- balancer handle for the current connection
     }
-
-    do
-      local s = service or EMPTY_T
-
-      balancer_data.retries         = s.retries         or 5
-      balancer_data.connect_timeout = s.connect_timeout or 60000
-      balancer_data.send_timeout    = s.write_timeout   or 60000
-      balancer_data.read_timeout    = s.read_timeout    or 60000
-    end
 
     ctx.service          = service
     ctx.route            = route
@@ -911,16 +951,14 @@ end
 
 
 local function set_init_versions_in_cache()
-  local ok, err = kong.core_cache:get("router:version", TTL_ZERO, function()
-    return "init"
-  end)
-  if not ok then
-    return nil, "failed to set router version in cache: " .. tostring(err)
+  if kong.configuration.role ~= "control_pane" then
+    local ok, err = kong.core_cache:safe_set("router:version", "init")
+    if not ok then
+      return nil, "failed to set router version in cache: " .. tostring(err)
+    end
   end
 
-  local ok, err = kong.core_cache:get("plugins_iterator:version", TTL_ZERO, function()
-    return "init"
-  end)
+  local ok, err = kong.core_cache:safe_set("plugins_iterator:version", "init")
   if not ok then
     return nil, "failed to set plugins iterator version in cache: " ..
                 tostring(err)
@@ -949,6 +987,7 @@ return {
   _set_update_plugins_iterator = _set_update_plugins_iterator,
   _get_updated_router = get_updated_router,
   _update_lua_mem = update_lua_mem,
+  _register_balancer_events = _register_balancer_events,
 
   init_worker = {
     before = function()
@@ -967,15 +1006,59 @@ return {
 
       register_events()
 
+      if kong.configuration.role == "control_plane" then
+        return
+      end
 
       -- initialize balancers for active healthchecks
       timer_at(0, function()
         balancer.init()
       end)
 
-      local worker_state_update_frequency = kong.configuration.worker_state_update_frequency or 1
+      local strategy = kong.db.strategy
 
-      if kong.db.strategy ~= "off" then
+      do
+        local rebuild_timeout = 60
+
+        if strategy == "cassandra" then
+          rebuild_timeout = kong.configuration.cassandra_timeout / 1000
+        end
+
+        if strategy == "postgres" then
+          rebuild_timeout = kong.configuration.pg_timeout / 1000
+        end
+
+        if strategy == "off" then
+          FLIP_CONFIG_OPTS = {
+            name = "flip-config",
+            timeout = rebuild_timeout,
+          }
+        end
+
+        if strategy == "off" or kong.configuration.worker_consistency == "strict" then
+          ROUTER_SYNC_OPTS = {
+            name = "router",
+            timeout = rebuild_timeout,
+            on_timeout = "run_unlocked",
+          }
+
+          PLUGINS_ITERATOR_SYNC_OPTS = {
+            name = "plugins_iterator",
+            timeout = rebuild_timeout,
+            on_timeout = "run_unlocked",
+          }
+        end
+      end
+
+      if strategy ~= "off" then
+        local worker_state_update_frequency = kong.configuration.worker_state_update_frequency or 1
+
+        local router_async_opts = {
+          name = "router",
+          timeout = 0,
+          on_timeout = "return_true",
+        }
+
         timer_every(worker_state_update_frequency, function(premature)
           if premature then
             return
@@ -985,64 +1068,35 @@ return {
           -- timer.
           -- If the semaphore is locked, that means that the rebuild is
           -- already ongoing.
-          local ok, err = rebuild_router(ROUTER_ASYNC_OPTS)
+          local ok, err = rebuild_router(router_async_opts)
           if not ok then
             log(ERR, "could not rebuild router via timer: ", err)
           end
         end)
+
+        local plugins_iterator_async_opts = {
+          name = "plugins_iterator",
+          timeout = 0,
+          on_timeout = "return_true",
+        }
 
         timer_every(worker_state_update_frequency, function(premature)
           if premature then
             return
           end
 
-          local ok, err = rebuild_plugins_iterator(PLUGINS_ITERATOR_ASYNC_OPTS)
+          local ok, err = rebuild_plugins_iterator(plugins_iterator_async_opts)
           if not ok then
             log(ERR, "could not rebuild plugins iterator via timer: ", err)
           end
         end)
       end
-
-      do
-        local rebuild_timeout = 60
-
-        if kong.configuration.database == "cassandra" then
-          rebuild_timeout = kong.configuration.cassandra_timeout / 1000
-        end
-
-        if kong.configuration.database == "postgres" then
-          rebuild_timeout = kong.configuration.pg_timeout / 1000
-        end
-
-        if kong.db.strategy == "off" then
-          FLIP_CONFIG_OPTS = {
-            name = "flip-config",
-            timeout = rebuild_timeout,
-          }
-        end
-
-        ROUTER_SYNC_OPTS = {
-          name = "router",
-          timeout = rebuild_timeout,
-          on_timeout = "run_unlocked",
-        }
-        ROUTER_ASYNC_OPTS = {
-          name = "router",
-          timeout = 0,
-          on_timeout = "return_true",
-        }
-        PLUGINS_ITERATOR_SYNC_OPTS = {
-          name = "plugins_iterator",
-          timeout = rebuild_timeout,
-          on_timeout = "run_unlocked",
-        }
-        PLUGINS_ITERATOR_ASYNC_OPTS = {
-          name = "plugins_iterator",
-          timeout = 0,
-          on_timeout = "return_true",
-        }
-      end
-
+    end,
+    after = NOOP,
+  },
+  certificate = {
+    before = function(ctx) -- Note: ctx here is for a connection (not for a single request)
+      certificate.execute()
     end,
     after = NOOP,
   },
@@ -1078,21 +1132,10 @@ return {
       end
     end
   },
-  certificate = {
-    before = function(_)
-      certificate.execute()
-    end,
-    after = NOOP,
-  },
   rewrite = {
     before = function(ctx)
       local server_port = var.server_port
       ctx.host_port = HOST_PORTS[server_port] or server_port
-
-      -- special handling for proxy-authorization and te headers in case
-      -- the plugin(s) want to specify them (store the original)
-      ctx.http_proxy_authorization = var.http_proxy_authorization
-      ctx.http_te                  = var.http_te
     end,
     after = NOOP,
   },
@@ -1106,21 +1149,21 @@ return {
         return
       end
 
+      ctx.scheme = var.scheme
+      ctx.request_uri = var.request_uri
+
       -- routing request
       local router = get_updated_router()
-      local match_t = router.exec()
+      local match_t = router.exec(ctx)
       if not match_t then
         return kong.response.exit(404, { message = "no Route matched with those values" })
       end
 
       ctx.workspace = match_t.route and match_t.route.ws_id
 
-      local http_version   = ngx.req.http_version()
-      local scheme         = var.scheme
       local host           = var.host
       local port           = tonumber(ctx.host_port, 10)
                           or tonumber(var.server_port, 10)
-      local content_type   = var.content_type
 
       local route          = match_t.route
       local service        = match_t.service
@@ -1144,20 +1187,20 @@ return {
 
       local trusted_ip = kong.ip.is_trusted(realip_remote_addr)
       if trusted_ip then
-        forwarded_proto  = var.http_x_forwarded_proto  or scheme
+        forwarded_proto  = var.http_x_forwarded_proto  or ctx.scheme
         forwarded_host   = var.http_x_forwarded_host   or host
         forwarded_port   = var.http_x_forwarded_port   or port
         forwarded_path   = var.http_x_forwarded_path
         forwarded_prefix = var.http_x_forwarded_prefix
 
       else
-        forwarded_proto  = scheme
+        forwarded_proto  = ctx.scheme
         forwarded_host   = host
         forwarded_port   = port
       end
 
       if not forwarded_path then
-        forwarded_path = var.request_uri
+        forwarded_path = ctx.request_uri
         local p = find(forwarded_path, "?", 2, true)
         if p then
           forwarded_path = sub(forwarded_path, 1, p - 1)
@@ -1186,37 +1229,38 @@ return {
         or redirect_status_code == 307
         or redirect_status_code == 308
         then
-          header["Location"] = "https://" .. forwarded_host .. var.request_uri
+          header["Location"] = "https://" .. forwarded_host .. ctx.request_uri
           return kong.response.exit(redirect_status_code)
         end
       end
 
-      -- mismatch: non-http/2 request matched grpc route
-      if (protocols and (protocols.grpc or protocols.grpcs) and http_version ~= 2 and
-        (content_type and sub(content_type, 1, #"application/grpc") == "application/grpc"))
-      then
-        return kong.response.exit(426, { message = "Please use HTTP2 protocol" }, {
-          ["connection"] = "Upgrade",
-          ["upgrade"]    = "HTTP/2",
-        })
-      end
+      local protocol_version = http_version()
+      if protocols.grpc or protocols.grpcs then
+        -- perf: branch usually not taken, don't cache var outside
+        local content_type = var.content_type
 
-      -- mismatch: non-grpc request matched grpc route
-      if (protocols and (protocols.grpc or protocols.grpcs) and
-        (not content_type or sub(content_type, 1, #"application/grpc") ~= "application/grpc"))
-      then
-        return kong.response.exit(415, { message = "Non-gRPC request matched gRPC route" })
-      end
+        if content_type and sub(content_type, 1, #"application/grpc") == "application/grpc" then
+          if protocol_version ~= 2 then
+            -- mismatch: non-http/2 request matched grpc route
+            return kong.response.exit(426, { message = "Please use HTTP2 protocol" }, {
+              ["connection"] = "Upgrade",
+              ["upgrade"]    = "HTTP/2",
+            })
+          end
 
-      -- mismatch: grpc request matched grpcs route
-      if (protocols and protocols.grpcs and not protocols.grpc and
-        forwarded_proto ~= "https")
-      then
-        return kong.response.exit(200, nil, {
-          ["content-type"] = "application/grpc",
-          ["grpc-status"] = 1,
-          ["grpc-message"] = "gRPC request matched gRPCs route",
-        })
+        else
+          -- mismatch: non-grpc request matched grpc route
+          return kong.response.exit(415, { message = "Non-gRPC request matched gRPC route" })
+        end
+
+        if not protocols.grpc and forwarded_proto ~= "https" then
+          -- mismatch: grpc request matched grpcs route
+          return kong.response.exit(200, nil, {
+            ["content-type"] = "application/grpc",
+            ["grpc-status"] = 1,
+            ["grpc-message"] = "gRPC request matched gRPCs route",
+          })
+        end
       end
 
       balancer_prepare(ctx, match_t.upstream_scheme,
@@ -1231,11 +1275,12 @@ return {
       --       router, which might have truncated it (`strip_uri`).
       -- `host` is the original header to be preserved if set.
       var.upstream_scheme = match_t.upstream_scheme -- COMPAT: pdk
-      var.upstream_uri    = match_t.upstream_uri
+      var.upstream_uri    = escape(match_t.upstream_uri)
       var.upstream_host   = match_t.upstream_host
 
       -- Keep-Alive and WebSocket Protocol Upgrade Headers
-      if var.http_upgrade and lower(var.http_upgrade) == "websocket" then
+      local upgrade = var.http_upgrade
+      if upgrade and lower(upgrade) == "websocket" then
         var.upstream_connection = "keep-alive, Upgrade"
         var.upstream_upgrade    = "websocket"
 
@@ -1264,41 +1309,63 @@ return {
       -- to `grpc_pass`. After redirection, this function will return early
       if service and var.kong_proxy_mode == "http" then
         if service.protocol == "grpc" or service.protocol == "grpcs" then
-          return ngx.exec("@grpc")
+          return exec("@grpc")
         end
 
-        if http_version == 1.1 then
+        if protocol_version == 1.1 then
           if route.request_buffering == false then
             if route.response_buffering == false then
-              return ngx.exec("@unbuffered")
+              return exec("@unbuffered")
             end
 
-            return ngx.exec("@unbuffered_request")
+            return exec("@unbuffered_request")
           end
 
           if route.response_buffering == false then
-            return ngx.exec("@unbuffered_response")
+            return exec("@unbuffered_response")
           end
         end
       end
     end,
     -- Only executed if the `router` module found a route and allows nginx to proxy it.
     after = function(ctx)
-      do
-        -- Nginx's behavior when proxying a request with an empty querystring
-        -- `/foo?` is to keep `$is_args` an empty string, hence effectively
-        -- stripping the empty querystring.
-        -- We overcome this behavior with our own logic, to preserve user
-        -- desired semantics.
-        local upstream_uri = var.upstream_uri
-
-        if var.is_args == "?" or sub(var.request_uri, -1) == "?" then
-          var.upstream_uri = upstream_uri .. "?" .. (var.args or "")
-        end
+      -- Nginx's behavior when proxying a request with an empty querystring
+      -- `/foo?` is to keep `$is_args` an empty string, hence effectively
+      -- stripping the empty querystring.
+      -- We overcome this behavior with our own logic, to preserve user
+      -- desired semantics.
+      -- perf: branch usually not taken, don't cache var outside
+      if sub(ctx.request_uri or var.request_uri, -1) == "?" then
+        var.upstream_uri = var.upstream_uri .. "?"
+      elseif var.is_args == "?" then
+        var.upstream_uri = var.upstream_uri .. "?" .. var.args or ""
       end
 
       local balancer_data = ctx.balancer_data
       balancer_data.scheme = var.upstream_scheme -- COMPAT: pdk
+      local upstream_scheme = balancer_data.scheme
+
+      -- The content of var.upstream_host is only set by the router if
+      -- preserve_host is true
+      --
+      -- We can't rely on var.upstream_host for balancer retries inside
+      -- `set_host_header` because it would never be empty after the first -- balancer try
+      local upstream_host = var.upstream_host
+      if upstream_host ~= nil and upstream_host ~= "" then
+        balancer_data.preserve_host = true
+
+        -- the nginx grpc module does not offer a way to override the
+        -- :authority pseudo-header; use our internal API to do so
+        -- this call applies to routes with preserve_host=true; for
+        -- preserve_host=false, the header is set in `set_host_header`,
+        -- so that it also applies to balancer retries
+        if upstream_scheme == "grpc" or upstream_scheme == "grpcs" then
+          local ok, err = kong.service.request.set_header(":authority", upstream_host)
+          if not ok then
+            log(ERR, "failed to set :authority header: ", err)
+          end
+        end
+      end
 
       local ok, err, errcode = balancer_execute(ctx)
       if not ok then
@@ -1306,49 +1373,26 @@ return {
         return kong.response.exit(errcode, body)
       end
 
+      upstream_scheme = balancer_data.scheme
       var.upstream_scheme = balancer_data.scheme
 
-      do
-        -- set the upstream host header if not `preserve_host`
-        local upstream_host = var.upstream_host
-        local upstream_scheme = var.upstream_scheme
-
-        if not upstream_host or upstream_host == "" then
-          upstream_host = balancer_data.hostname
-
-          if upstream_scheme == "http"  and balancer_data.port ~= 80 or
-             upstream_scheme == "https" and balancer_data.port ~= 443 or
-             upstream_scheme == "grpc"  and balancer_data.port ~= 80 or
-             upstream_scheme == "grpcs" and balancer_data.port ~= 443
-          then
-            upstream_host = upstream_host .. ":" .. balancer_data.port
-          end
-
-          var.upstream_host = upstream_host
-        end
-
-        -- the nginx grpc module does not offer a way to overrride
-        -- the :authority pseudo-header; use our internal API to
-        -- do so
-        if upstream_scheme == "grpc" or upstream_scheme == "grpcs" then
-          ok, err = kong.service.request.set_header(":authority", upstream_host)
-          if not ok then
-            log(ERR, "failed to set :authority header: ", err)
-          end
-        end
+      local ok, err = balancer.set_host_header(balancer_data, upstream_scheme, upstream_host)
+      if not ok then
+        log(ERR, "failed to set balancer Host header: ", err)
+        return exit(500)
       end
 
       -- clear hop-by-hop request headers:
       for _, header_name in csv(var.http_connection) do
         -- some of these are already handled by the proxy module,
-        -- proxy-authorization and upgrade being an exception that
-        -- is handled below with special semantics.
+        -- upgrade being an exception that is handled below with
+        -- special semantics.
         if header_name == "upgrade" then
           if var.upstream_connection == "keep-alive" then
             clear_header(header_name)
           end
 
-        elseif header_name ~= "proxy-authorization" then
+        else
           clear_header(header_name)
         end
       end
@@ -1368,14 +1412,6 @@ return {
       if var.http_proxy_connection then
         clear_header("Proxy-Connection")
       end
-
-      -- clear the proxy-authorization header only in case the plugin didn't
-      -- specify it, assuming that the plugin didn't specify the same value.
-      local proxy_authorization = var.http_proxy_authorization
-      if proxy_authorization and
-         proxy_authorization == var.http_proxy_authorization then
-        clear_header("Proxy-Authorization")
-      end
     end
   },
   response = {
@@ -1390,16 +1426,14 @@ return {
 
       -- clear hop-by-hop response headers:
       for _, header_name in csv(var.upstream_http_connection) do
-        header[header_name] = nil
+        if header_name ~= "close" and header_name ~= "upgrade" and header_name ~= "keep-alive" then
+          header[header_name] = nil
+        end
       end
 
-      if var.upstream_http_upgrade and
-         lower(var.upstream_http_upgrade) ~= lower(var.upstream_upgrade) then
+      local upgrade = var.upstream_http_upgrade
+      if upgrade and lower(upgrade) ~= lower(var.upstream_upgrade) then
         header["Upgrade"] = nil
-      end
-
-      if var.upstream_http_proxy_authenticate then
-        header["Proxy-Authenticate"] = nil
       end
 
       -- remove trailer response header when client didn't ask for them
@@ -1415,18 +1449,22 @@ return {
         end
       end
 
-      local hash_cookie = ctx.balancer_data.hash_cookie
-      if not hash_cookie then
-        return
+      -- if this is the last try and it failed, save its state to correctly log it
+      local status = ngx.status
+      if status > 499 and ctx.balancer_data then
+        local balancer_data = ctx.balancer_data
+        local try_count = balancer_data.try_count
+        local retries = balancer_data.retries
+        if try_count > retries then
+          local current_try = balancer_data.tries[try_count]
+          current_try.state = "failed"
+          current_try.code = status
+        end
       end
 
-      local cookie = ck:new()
-      local ok, err = cookie:set(hash_cookie)
-
-      if not ok then
-        log(WARN, "failed to set the cookie for hash-based load balancing: ", err,
-                  " (key=", hash_cookie.key,
-                  ", path=", hash_cookie.path, ")")
+      local hash_cookie = ctx.balancer_data.hash_cookie
+      if hash_cookie then
+        balancer.set_cookie(hash_cookie)
       end
     end,
     after = function(ctx)
@@ -1489,7 +1527,9 @@ return {
             balancer_data.balancer_handle, status)
         end
         -- release the handle, so the balancer can update its statistics
-        balancer_data.balancer_handle:release()
+        if balancer_data.balancer_handle.release then
+          balancer_data.balancer_handle:release()
+        end
       end
     end
   }

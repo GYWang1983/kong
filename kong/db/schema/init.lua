@@ -18,6 +18,7 @@ local pcall        = pcall
 local floor        = math.floor
 local type         = type
 local next         = next
+local update_time  = ngx.update_time
 local ngx_time     = ngx.time
 local ngx_now      = ngx.now
 local find         = string.find
@@ -94,9 +95,10 @@ local validation_errors = {
   CONDITIONAL               = "failed conditional validation given value of field '%s'",
   AT_LEAST_ONE_OF           = "at least one of these fields must be non-empty: %s",
   CONDITIONAL_AT_LEAST_ONE_OF = "at least one of these fields must be non-empty: %s",
-  ONLY_ONE_OF               = "only one of these fields must be non-empty: %s",
+  ONLY_ONE_OF               = "exactly one of these fields must be non-empty: %s",
   DISTINCT                  = "values of these fields must be distinct: %s",
   MUTUALLY_REQUIRED         = "all or none of these fields must be set: %s",
+  MUTUALLY_EXCLUSIVE        = "only one or none of these fields must be set: %s",
   MUTUALLY_EXCLUSIVE_SETS   = "these sets are mutually exclusive: %s",
   -- schema error
   SCHEMA_NO_DEFINITION      = "expected a definition table",
@@ -507,6 +509,23 @@ local function mutually_required(entity, field_names)
 end
 
 
+local function mutually_exclusive(entity, field_names)
+  local nonempty = {}
+
+  for _, name in ipairs(field_names) do
+    if is_nonempty(get_field(entity, name)) then
+      insert(nonempty, name)
+    end
+  end
+
+  if #nonempty == 0 or #nonempty == 1 then
+    return true
+  end
+
+  return nil, quoted_list(field_names)
+end
+
+
 --- Entity checkers are cross-field validation rules.
 -- An entity checker is implemented as an entry in this table,
 -- containing a mandatory field `fn`, the checker function,
@@ -732,6 +751,11 @@ Schema.entity_checkers = {
   mutually_required = {
     run_with_missing_fields = true,
     fn = mutually_required,
+  },
+
+  mutually_exclusive = {
+    run_with_missing_fields = true,
+    fn = mutually_exclusive,
   },
 
   mutually_exclusive_sets = {
@@ -1085,6 +1109,11 @@ validate_fields = function(self, input)
       field, err = resolve_field(self, k, field, subschema)
       if field then
         _, errors[k] = self:validate_field(field, v)
+      elseif err == validation_errors.UNKNOWN and v == null and
+            kong and kong.configuration and
+            kong.configuration.role == "data_plane" then -- luacheck: ignore
+        -- extra fields with value of null in the input config are ignored
+        -- otherwise record the error
       else
         errors[k] = err
       end
@@ -1534,11 +1563,6 @@ end
 -- @return A new table, with the auto fields containing
 -- appropriate updated values.
 function Schema:process_auto_fields(data, context, nulls, opts)
-  ngx.update_time()
-
-  local now_s  = ngx_time()
-  local now_ms = ngx_now()
-
   local check_immutable_fields = false
 
   data = tablex.deepcopy(data)
@@ -1585,6 +1609,9 @@ function Schema:process_auto_fields(data, context, nulls, opts)
     end
   end
 
+  local now_s
+  local now_ms
+
   for key, field in self:each_field(data) do
 
     if field.legacy and field.uuid and data[key] == "" then
@@ -1606,8 +1633,17 @@ function Schema:process_auto_fields(data, context, nulls, opts)
              and (context == "insert" or context == "upsert")
              and (data[key] == null or data[key] == nil) then
         if field.type == "number" then
+          if not now_ms then
+            update_time()
+            now_ms = ngx_now()
+          end
           data[key] = now_ms
+
         elseif field.type == "integer" then
+          if not now_s then
+            update_time()
+            now_s = ngx_time()
+          end
           data[key] = now_s
         end
 
@@ -1615,8 +1651,17 @@ function Schema:process_auto_fields(data, context, nulls, opts)
                                       context == "upsert" or
                                       context == "update") then
         if field.type == "number" then
+          if not now_ms then
+            update_time()
+            now_ms = ngx_now()
+          end
           data[key] = now_ms
+
         elseif field.type == "integer" then
+          if not now_s then
+            update_time()
+            now_s = ngx_time()
+          end
           data[key] = now_s
         end
       end
@@ -1997,7 +2042,7 @@ end
 function Schema:get_constraints()
   if self.name == "workspaces" then
     -- merge explicit and implicit constraints for workspaces
-    for _, e in ipairs(_cache["workspaces"].constraints) do
+    for _, e in pairs(_cache["workspaces"].constraints) do
       local found = false
       for _, w in ipairs(_workspaceable) do
         if w == e then
@@ -2012,7 +2057,11 @@ function Schema:get_constraints()
     return _workspaceable
   end
 
-  return _cache[self.name].constraints
+  local constraints = {}
+  for _, c in pairs(_cache[self.name].constraints) do
+    table.insert(constraints, c)
+  end
+  return constraints
 end
 
 
@@ -2143,11 +2192,14 @@ function Schema.new(definition, is_subschema)
       if not is_subschema then
         -- Store the inverse relation for implementing constraints
         local constraints = assert(_cache[field.reference]).constraints
-        table.insert(constraints, {
-          schema     = self,
-          field_name = key,
-          on_delete  = field.on_delete,
-        })
+        -- Set logic to prevent duplicates when Schema is initialized multiple times
+        if self.name then
+          constraints[self.name] = {
+            schema     = self,
+            field_name = key,
+            on_delete  = field.on_delete,
+          }
+        end
       end
     end
   end

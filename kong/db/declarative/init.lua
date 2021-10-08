@@ -1,5 +1,5 @@
 local declarative_config = require "kong.db.schema.others.declarative_config"
-local topological_sort = require "kong.db.schema.topological_sort"
+local schema_topological_sort = require "kong.db.schema.topological_sort"
 local workspaces = require "kong.workspaces"
 local pl_file = require "pl.file"
 local lyaml = require "lyaml"
@@ -19,6 +19,11 @@ local PREFIX = ngx.config.prefix()
 local SUBSYS = ngx.config.subsystem
 local WORKER_COUNT = ngx.worker.count()
 local DECLARATIVE_HASH_KEY = constants.DECLARATIVE_HASH_KEY
+
+
+local DECLARATIVE_LOCK_KEY = "declarative:lock"
+local DECLARATIVE_LOCK_TTL = 60
+
 
 local declarative = {}
 
@@ -122,6 +127,10 @@ end
 --     },
 
 --   }
+-- @tparam string contents the json/yml/lua being parsed
+-- @tparam string|nil filename. If nil, json will be tried first, then yaml, then lua (unless deactivated by accept)
+-- @tparam table|nil table which specifies which content types are active. By default it is yaml and json only.
+-- @tparam string|nil old_hash used to avoid loading the same content more than once, if present
 -- @treturn nil|string error message, only if error happened
 -- @treturn nil|table err_t, only if error happened
 -- @treturn table|nil a table with the following format:
@@ -143,8 +152,20 @@ function Config:parse_string(contents, filename, accept, old_hash)
   -- do not accept Lua by default
   accept = accept or { yaml = true, json = true }
 
+  local tried_one = false
   local dc_table, err
-  if accept.yaml and ((not filename) or filename:match("ya?ml$")) then
+  if accept.json
+    and (filename == nil or filename:match("json$"))
+  then
+    tried_one = true
+    dc_table, err = cjson.decode(contents)
+  end
+
+  if type(dc_table) ~= "table"
+    and accept.yaml
+    and (filename == nil or filename:match("ya?ml$"))
+  then
+    tried_one = true
     local pok
     pok, dc_table, err = pcall(lyaml.load, contents)
     if not pok then
@@ -153,12 +174,18 @@ function Config:parse_string(contents, filename, accept, old_hash)
 
     elseif type(dc_table) == "table" then
       convert_nulls(dc_table, lyaml.null, null)
+
+    else
+      err = "expected an object"
+      dc_table = nil
     end
+  end
 
-  elseif accept.json and filename:match("json$") then
-    dc_table, err = cjson.decode(contents)
-
-  elseif accept.lua and filename:match("lua$") then
+  if type(dc_table) ~= "table"
+    and accept.lua
+    and (filename == nil or filename:match("lua$"))
+  then
+    tried_one = true
     local chunk, pok
     chunk, err = loadstring(contents)
     if chunk then
@@ -169,29 +196,24 @@ function Config:parse_string(contents, filename, accept, old_hash)
         dc_table = nil
       end
     end
-
-  else
-    local accepted = {}
-    for k, _ in pairs(accept) do
-      table.insert(accepted, k)
-    end
-    table.sort(accepted)
-    local err = "unknown file extension (" ..
-                table.concat(accepted, ", ") ..
-                " " .. (#accepted == 1 and "is" or "are") ..
-                " supported): " .. filename
-    return nil, err, { error = err }
-  end
-
-  if dc_table ~= nil and type(dc_table) ~= "table" then
-    dc_table = nil
-    err = "expected an object"
   end
 
   if type(dc_table) ~= "table" then
-    err = "failed parsing declarative configuration" ..
-        (filename and " file " .. filename or "") ..
-        (err and ": " .. err or "")
+    if not tried_one then
+      local accepted = {}
+      for k, _ in pairs(accept) do
+        accepted[#accepted + 1] = k
+      end
+      table.sort(accepted)
+
+      err = "unknown file type: " ..
+            tostring(filename) ..
+            ". (Accepted types: " ..
+            table.concat(accepted, ", ") .. ")"
+    else
+      err = "failed parsing declarative configuration" .. (err and (": " .. err) or "")
+    end
+
     return nil, err, { error = err }
   end
 
@@ -319,7 +341,7 @@ function declarative.load_into_db(entities, meta)
       return nil, "unknown entity: " .. entity_name
     end
   end
-  local sorted_schemas, err = topological_sort(schemas)
+  local sorted_schemas, err = schema_topological_sort(schemas)
   if not sorted_schemas then
     return nil, err
   end
@@ -360,7 +382,7 @@ local function export_from_db(emitter, skip_ws)
       table.insert(schemas, dao.schema)
     end
   end
-  local sorted_schemas, err = topological_sort(schemas)
+  local sorted_schemas, err = schema_topological_sort(schemas)
   if not sorted_schemas then
     return nil, err
   end
@@ -757,8 +779,6 @@ end
 
 
 do
-  local DECLARATIVE_FLIPS_NAME = constants.DECLARATIVE_FLIPS.name
-  local DECLARATIVE_FLIPS_TTL = constants.DECLARATIVE_FLIPS.ttl
   local DECLARATIVE_PAGE_KEY = constants.DECLARATIVE_PAGE_KEY
 
   function declarative.load_into_cache_with_events(entities, meta, hash)
@@ -766,21 +786,21 @@ do
       return nil, "exiting"
     end
 
-    local ok, err = ngx.shared.kong:add(DECLARATIVE_FLIPS_NAME, 0, DECLARATIVE_FLIPS_TTL)
+    local ok, err = declarative.try_lock()
     if not ok then
       if err == "exists" then
-        local ttl = math.min(ngx.shared.kong:ttl(DECLARATIVE_FLIPS_NAME), 10)
+        local ttl = math.min(ngx.shared.kong:ttl(DECLARATIVE_LOCK_KEY), 10)
         return nil, "busy", ttl
       end
 
-      ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+      ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
       return nil, err
     end
 
     -- ensure any previous update finished (we're flipped to the latest page)
     ok, err = kong.worker_events.poll()
     if not ok then
-      ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+      ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
       return nil, err
     end
 
@@ -793,7 +813,7 @@ do
       local sock = ngx_socket_tcp()
       ok, err = sock:connect("unix:" .. PREFIX .. "/stream_config.sock")
       if not ok then
-        ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+        ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
         return nil, err
       end
 
@@ -803,7 +823,7 @@ do
       sock:close()
 
       if not bytes then
-        ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+        ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
         return nil, err
       end
 
@@ -811,7 +831,7 @@ do
     end
 
     if ngx.worker.exiting() then
-      ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+      ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
       return nil, "exiting"
     end
 
@@ -820,31 +840,31 @@ do
     if ok then
       ok, err = kong.worker_events.post("declarative", "flip_config", default_ws)
       if ok ~= "done" then
-        ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+        ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
         return nil, "failed to flip declarative config cache pages: " .. (err or ok)
       end
 
     else
-      ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+      ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
       return nil, err
     end
 
     ok, err = ngx.shared.kong:set(DECLARATIVE_PAGE_KEY, kong.cache:get_page())
     if not ok then
-      ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+      ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
       return nil, "failed to persist cache page number: " .. err
     end
 
     if ngx.worker.exiting() then
-      ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+      ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
       return nil, "exiting"
     end
 
-    local sleep_left = DECLARATIVE_FLIPS_TTL
+    local sleep_left = DECLARATIVE_LOCK_TTL
     local sleep_time = 0.0375
 
     while sleep_left > 0 do
-      local flips = ngx.shared.kong:get(DECLARATIVE_FLIPS_NAME)
+      local flips = ngx.shared.kong:get(DECLARATIVE_LOCK_KEY)
       if flips == nil or flips >= WORKER_COUNT then
         break
       end
@@ -857,20 +877,47 @@ do
       ngx.sleep(sleep_time)
 
       if ngx.worker.exiting() then
-        ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+        ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
         return nil, "exiting"
       end
 
       sleep_left = sleep_left - sleep_time
     end
 
-    ngx.shared.kong:delete(DECLARATIVE_FLIPS_NAME)
+    ngx.shared.kong:delete(DECLARATIVE_LOCK_KEY)
 
     if sleep_left <= 0 then
       return nil, "timeout"
     end
 
     return true
+  end
+end
+
+
+-- prevent POST /config (declarative.load_into_cache_with_events eary-exits)
+-- only "succeeds" the first time it gets called.
+-- successive calls return nil, "exists"
+function declarative.try_lock()
+  return ngx.shared.kong:add(DECLARATIVE_LOCK_KEY, 0, DECLARATIVE_LOCK_TTL)
+end
+
+
+-- increments the counter inside the lock - each worker does this while reading new declarative config
+-- can (is expected to) be called multiple times, suceeding every time
+function declarative.lock()
+  return ngx.shared.kong:incr(DECLARATIVE_LOCK_KEY, 1, 0, DECLARATIVE_LOCK_TTL)
+end
+
+
+-- prevent POST, but release if all workers have finished updating
+function declarative.try_unlock()
+  local kong_shm = ngx.shared.kong
+  if kong_shm:get(DECLARATIVE_LOCK_KEY) then
+    local count = kong_shm:incr(DECLARATIVE_LOCK_KEY, 1)
+    if count and count >= WORKER_COUNT then
+      kong_shm:delete(DECLARATIVE_LOCK_KEY)
+    end
   end
 end
 
