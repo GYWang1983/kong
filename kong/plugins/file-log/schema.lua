@@ -1,5 +1,6 @@
 local typedefs = require "kong.db.schema.typedefs"
 
+
 return {
   name = "file-log",
   fields = {
@@ -12,7 +13,9 @@ return {
                      match = [[^[^*&%%\`]+$]],
                      err = "not a valid filename",
           }, },
-          { reopen = { type = "boolean", default = false }, },
-    }, }, },
+          { reopen = { type = "boolean", required = true, default = false }, },
+          { custom_fields_by_lua = typedefs.lua_code },
+        },
+    }, },
   }
 }

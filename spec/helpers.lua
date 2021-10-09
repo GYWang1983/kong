@@ -1,7 +1,7 @@
 ------------------------------------------------------------------
 -- Collection of utilities to help testing Kong features and plugins.
 --
--- @copyright Copyright 2016-2020 Kong Inc. All rights reserved.
+-- @copyright Copyright 2016-2021 Kong Inc. All rights reserved.
 -- @license [Apache 2.0](https://opensource.org/licenses/Apache-2.0)
 -- @module spec.helpers
 
@@ -20,6 +20,8 @@ local MOCK_UPSTREAM_STREAM_PORT = 15557
 local MOCK_UPSTREAM_STREAM_SSL_PORT = 15558
 local MOCK_GRPC_UPSTREAM_PROTO_PATH = "./spec/fixtures/grpc/hello.proto"
 local BLACKHOLE_HOST = "10.255.255.255"
+local KONG_VERSION = require("kong.meta")._VERSION
+local PLUGINS_LIST
 
 local consumers_schema_def = require "kong.db.schema.entities.consumers"
 local services_schema_def = require "kong.db.schema.entities.services"
@@ -48,12 +50,20 @@ local nginx_signals = require "kong.cmd.utils.nginx_signals"
 local log = require "kong.cmd.utils.log"
 local DB = require "kong.db"
 local ffi = require "ffi"
+local ssl = require "ngx.ssl"
+local ws_client = require "resty.websocket.client"
+local table_clone = require "table.clone"
+local https_server = require "spec.fixtures.https_server"
+local stress_generator = require "spec.fixtures.stress_generator"
 
 
 ffi.cdef [[
   int setenv(const char *name, const char *value, int overwrite);
   int unsetenv(const char *name);
 ]]
+
+
+local kong_exec   -- forward declaration
 
 
 log.set_lvl(log.levels.quiet) -- disable stdout logs in tests
@@ -135,7 +145,7 @@ end
 
 
 --- Unset an environment variable
--- @function setenv
+-- @function unsetenv
 -- @param env (string) name of the environment variable
 -- @return true on success, false otherwise
 local function unsetenv(env)
@@ -145,19 +155,20 @@ end
 
 --- Write a yaml file.
 -- @function make_yaml_file
--- @param content (string) the yaml string to write to the file
+-- @param content (string) the yaml string to write to the file, if omitted the
+-- current database contents will be written using `kong config db_export`.
 -- @param filename (optional) if not provided, a temp name will be created
 -- @return filename of the file written
 local function make_yaml_file(content, filename)
-  if not filename then
-    filename = os.tmpname()
-    os.rename(filename, filename .. ".yml")
-    filename = filename .. ".yml"
+  local filename = filename or pl_path.tmpname() .. ".yml"
+  if content then
+    local fd = assert(io.open(filename, "w"))
+    assert(fd:write(unindent(content)))
+    assert(fd:write("\n")) -- ensure last line ends in newline
+    assert(fd:close())
+  else
+    assert(kong_exec("config db_export --conf "..TEST_CONF_PATH.." "..filename))
   end
-  local fd = assert(io.open(filename, "w"))
-  assert(fd:write(unindent(content)))
-  assert(fd:write("\n")) -- ensure last line ends in newline
-  assert(fd:close())
   return filename
 end
 
@@ -170,6 +181,13 @@ local conf = assert(conf_loader(TEST_CONF_PATH))
 _G.kong = kong_global.new()
 kong_global.init_pdk(_G.kong, conf, nil) -- nil: latest PDK
 kong_global.set_phase(kong, kong_global.phases.access)
+_G.kong.core_cache = {
+  get = function(self, key)
+    if key == constants.CLUSTER_ID_PARAM_KEY then
+      return "123e4567-e89b-12d3-a456-426655440000"
+    end
+  end
+}
 
 local db = assert(DB.new(conf))
 assert(db:init_connector())
@@ -201,7 +219,7 @@ end
 -- @param strategies (optional string array) explicit list of strategies to use,
 -- defaults to `{ "postgres", "cassandra", "off" }`.
 -- @see each_strategy
--- @see write_declarative_config
+-- @see make_yaml_file
 -- @usage
 -- -- example of using DB-less testing
 --
@@ -230,10 +248,10 @@ end
 --         nginx_conf = "spec/fixtures/custom_nginx.template",
 --         plugins = "bundled," .. PLUGIN_NAME,
 --
---         -- The call to "write_declarative_config" will write the contents of
+--         -- The call to "make_yaml_file" will write the contents of
 --         -- the database to a temporary file, which filename is returned.
 --         -- But only when "strategy=off".
---         declarative_config = strategy == "off" and helpers.write_declarative_config() or nil,
+--         declarative_config = strategy == "off" and helpers.make_yaml_file() or nil,
 --
 --         -- the below lines can be omitted, but are just to prove that the test
 --         -- really runs DB-less despite that Postgres was used as intermediary
@@ -417,6 +435,17 @@ local function get_db_utils(strategy, tables, plugins)
     workspaces.upsert_default(db)
   end
 
+  -- calculation can only happen here because this function
+  -- initializes the kong.db instance
+  PLUGINS_LIST = assert(kong.db.plugins:get_handlers())
+  table.sort(PLUGINS_LIST, function(a, b)
+    return a.name:lower() < b.name:lower()
+  end)
+
+  PLUGINS_LIST = pl_tablex.map(function(p)
+    return { name = p.name, version = p.handler.VERSION, }
+  end, PLUGINS_LIST)
+
   return bp, db
 end
 
@@ -437,7 +466,8 @@ end
 -----------------
 -- Custom helpers
 -----------------
-local resty_http_proxy_mt = {}
+local resty_http_proxy_mt = setmetatable({}, { __index = http })
+resty_http_proxy_mt.__index = resty_http_proxy_mt
 
 local pack = function(...) return { n = select("#", ...), ... } end
 local unpack = function(t) return unpack(t, 1, t.n) end
@@ -513,79 +543,6 @@ local function lookup(t, k)
 end
 
 
---- Waits until a specific condition is met.
--- The check function will repeatedly be called (with a fixed interval), until
--- the condition is met, or the
--- timeout value is exceeded.
--- @function wait_until
--- @param f check function that should return `truthy` when the condition has
--- been met
--- @param timeout (optional) maximum time to wait after which an error is
--- thrown, defaults to 5.
--- @return nothing. It returns when the condition is met, or throws an error
--- when it times out.
--- @usage -- wait 10 seconds for a file "myfilename" to appear
--- helpers.wait_until(function() return file_exist("myfilename") end, 10)
-local function wait_until(f, timeout, step)
-  if type(f) ~= "function" then
-    error("arg #1 must be a function", 2)
-  end
-
-  if timeout ~= nil and type(timeout) ~= "number" then
-    error("arg #2 must be a number", 2)
-  end
-
-  if step ~= nil and type(step) ~= "number" then
-    error("arg #3 must be a number", 2)
-  end
-
-  ngx.update_time()
-
-  timeout = timeout or 5
-  step = step or 0.05
-
-  local tstart = ngx.time()
-  local texp = tstart + timeout
-  local ok, res, err
-
-  repeat
-    ok, res, err = pcall(f)
-    ngx.sleep(step)
-    ngx.update_time()
-  until not ok or res or ngx.time() >= texp
-
-  if not ok then
-    -- report error from `f`, such as assert gone wrong
-    error(tostring(res), 2)
-  elseif not res and err then
-    -- report a failure for `f` to meet its condition
-    -- and eventually an error return value which could be the cause
-    error("wait_until() timeout: " .. tostring(err) .. " (after delay: " .. timeout .. "s)", 2)
-  elseif not res then
-    -- report a failure for `f` to meet its condition
-    error("wait_until() timeout (after delay " .. timeout .. "s)", 2)
-  end
-end
-
-
-local admin_client -- forward declaration
-
---- Waits for invalidation of a cached key by polling the mgt-api
--- and waiting for a 404 response.
--- @function wait_for_invalidation
--- @param key (string) the cache-key to check
--- @param timeout (optional) in seconds (for default see `wait_until`).
-local function wait_for_invalidation(key, timeout)
-  -- TODO: this code is not used, but is duplicated all over the codebase!
-  -- search codebase for "/cache/" endpoint
-  local api_client = admin_client()
-  wait_until(function()
-    local res = api_client:get("/cache/" .. key)
-    res:read_body()
-    return res.status == 404
-  end, timeout)
-end
-
 
 --- http_client.
 -- An http-client class to perform requests.
@@ -660,7 +617,7 @@ function resty_http_proxy_mt:send(opts)
     end
 
     local clength = lookup(headers, "content-length")
-    if not clength then
+    if not clength and not opts.dont_add_content_length then
       headers["content-length"] = #body
     end
 
@@ -704,16 +661,6 @@ for _, method_name in ipairs({"get", "post", "put", "patch", "delete"}) do
   end
 end
 
-function resty_http_proxy_mt:__index(k)
-  local f = rawget(resty_http_proxy_mt, k)
-  if f then
-    return f
-  end
-
-  return self.client[k]
-end
-
-
 --- Creates a http client.
 -- Instead of using this client, you'll probably want to use the pre-configured
 -- clients available as `proxy_client`, `admin_client`, etc. because these come
@@ -731,12 +678,13 @@ end
 -- @see admin_ssl_client
 local function http_client(host, port, timeout)
   timeout = timeout or 10000
-  local client = assert(http.new())
-  assert(client:connect(host, port), "Could not connect to " .. host .. ":" .. port)
-  client:set_timeout(timeout)
-  return setmetatable({
-    client = client
-  }, resty_http_proxy_mt)
+  local self = setmetatable(assert(http.new()), resty_http_proxy_mt)
+  local _, err = self:connect(host, port)
+  if err then
+    error("Could not connect to " .. host .. ":" .. port .. ": " .. err)
+  end
+  self:set_timeout(timeout)
+  return self
 end
 
 
@@ -773,11 +721,13 @@ end
 --- returns a pre-configured `http_client` for the Kong proxy port.
 -- @function proxy_client
 -- @param timeout (optional, number) the timeout to use
-local function proxy_client(timeout)
+-- @param forced_port (optional, number) if provided will override the port in
+-- the Kong configuration with this port
+local function proxy_client(timeout, forced_port)
   local proxy_ip = get_proxy_ip(false)
   local proxy_port = get_proxy_port(false)
   assert(proxy_ip, "No http-proxy found in the configuration")
-  return http_client(proxy_ip, proxy_port, timeout or 60000)
+  return http_client(proxy_ip, forced_port or proxy_port, timeout or 60000)
 end
 
 
@@ -800,7 +750,7 @@ end
 -- @param timeout (optional, number) the timeout to use
 -- @param forced_port (optional, number) if provided will override the port in
 -- the Kong configuration with this port
-function admin_client(timeout, forced_port)
+local function admin_client(timeout, forced_port)
   local admin_ip, admin_port
   for _, entry in ipairs(conf.admin_listeners) do
     if entry.ssl == false then
@@ -1367,6 +1317,88 @@ local say = require "say"
 local luassert = require "luassert.assert"
 
 
+--- Waits until a specific condition is met.
+-- The check function will repeatedly be called (with a fixed interval), until
+-- the condition is met. Throws an error on timeout.
+--
+-- NOTE: this is a regular Lua function, not a Luassert assertion.
+-- @function wait_until
+-- @param f check function that should return `truthy` when the condition has
+-- been met
+-- @param timeout (optional) maximum time to wait after which an error is
+-- thrown, defaults to 5.
+-- @param step (optional) interval between checks, defaults to 0.05.
+-- @return nothing. It returns when the condition is met, or throws an error
+-- when it times out.
+-- @usage
+-- -- wait 10 seconds for a file "myfilename" to appear
+-- helpers.wait_until(function() return file_exist("myfilename") end, 10)
+local function wait_until(f, timeout, step)
+  if type(f) ~= "function" then
+    error("arg #1 must be a function", 2)
+  end
+
+  if timeout ~= nil and type(timeout) ~= "number" then
+    error("arg #2 must be a number", 2)
+  end
+
+  if step ~= nil and type(step) ~= "number" then
+    error("arg #3 must be a number", 2)
+  end
+
+  ngx.update_time()
+
+  timeout = timeout or 5
+  step = step or 0.05
+
+  local tstart = ngx.time()
+  local texp = tstart + timeout
+  local ok, res, err
+
+  repeat
+    ok, res, err = pcall(f)
+    ngx.sleep(step)
+    ngx.update_time()
+  until not ok or res or ngx.time() >= texp
+
+  if not ok then
+    -- report error from `f`, such as assert gone wrong
+    error(tostring(res), 2)
+  elseif not res and err then
+    -- report a failure for `f` to meet its condition
+    -- and eventually an error return value which could be the cause
+    error("wait_until() timeout: " .. tostring(err) .. " (after delay: " .. timeout .. "s)", 2)
+  elseif not res then
+    -- report a failure for `f` to meet its condition
+    error("wait_until() timeout (after delay " .. timeout .. "s)", 2)
+  end
+end
+
+
+--- Waits for invalidation of a cached key by polling the mgt-api
+-- and waiting for a 404 response. Throws an error on timeout.
+--
+-- NOTE: this is a regular Lua function, not a Luassert assertion.
+-- @function wait_for_invalidation
+-- @param key (string) the cache-key to check
+-- @param timeout (optional) in seconds (for default see `wait_until`).
+-- @return nothing. It returns when the key is invalidated, or throws an error
+-- when it times out.
+-- @usage
+-- local cache_key = "abc123"
+-- helpers.wait_for_invalidation(cache_key, 10)
+local function wait_for_invalidation(key, timeout)
+  -- TODO: this code is duplicated all over the codebase,
+  -- search codebase for "/cache/" endpoint
+  local api_client = admin_client()
+  wait_until(function()
+    local res = api_client:get("/cache/" .. key)
+    res:read_body()
+    return res.status == 404
+  end, timeout)
+end
+
+
 --- Generic modifier "response".
 -- Will set a "response" value in the assertion state, so following
 -- assertions will operate on the value set.
@@ -1500,6 +1532,42 @@ Expected to not contain:
 luassert:register("assertion", "contains", contains,
                   "assertion.contains.negative",
                   "assertion.contains.positive")
+
+local deep_sort do
+  local function deep_compare(a, b)
+    if a == nil then
+      a = ""
+    end
+
+    if b == nil then
+      b = ""
+    end
+
+    deep_sort(a)
+    deep_sort(b)
+
+    if type(a) ~= type(b) then
+      return type(a) < type(b)
+    end
+
+    if type(a) == "table" then
+      return deep_compare(a[1], b[1])
+    end
+
+    return a < b
+  end
+
+  function deep_sort(t)
+    if type(t) == "table" then
+      for _, v in pairs(t) do
+        deep_sort(v)
+      end
+      table.sort(t, deep_compare)
+    end
+
+    return t
+  end
+end
 
 
 --- Assertion to check the status-code of a http response.
@@ -1881,6 +1949,7 @@ do
   -- @param path A path to the log file (defaults to the test prefix's
   -- errlog).
   -- @see line
+  -- @see clean_logfile
   -- @usage
   -- assert.logfile("./my/logfile.log").has.no.line("[error]", true)
   local function modifier_errlog(state, args)
@@ -1910,7 +1979,12 @@ do
   -- @param fpath An optional path to the file (defaults to the filelog
   -- modifier)
   -- @see logfile
+  -- @see clean_logfile
   -- @usage
+  -- helpers.clean_logfile()
+  --
+  -- -- run some tests here
+  --
   -- assert.logfile().has.no.line("[error]", true)
   local function match_line(state, args)
     local regex = args[1]
@@ -2012,10 +2086,14 @@ do
   dns_mock.__index = dns_mock
   dns_mock.__tostring = function(self)
     -- fill array to prevent json encoding errors
+    local out = {
+      should_fail = self.should_fail,
+      records = {}
+    }
     for i = 1, 33 do
-      self[i] = self[i] or {}
+      out.records[i] = self[i] or {}
     end
-    local json = assert(cjson.encode(self))
+    local json = assert(cjson.encode(out))
     return json
   end
 
@@ -2212,7 +2290,7 @@ end
 -- @return if `pl_returns` is true, returns four return values
 -- (ok, code, stdout, stderr); if `pl_returns` is false,
 -- returns either (false, stderr) or (true, stderr, stdout).
-local function kong_exec(cmd, env, pl_returns, env_vars)
+function kong_exec(cmd, env, pl_returns, env_vars)
   cmd = cmd or ""
   env = env or {}
 
@@ -2332,11 +2410,24 @@ end
 -- It may differ from the default, as it may have been modified
 -- by the `env` table given to start_kong.
 -- @function get_running_conf
--- @param prefix The prefix path where the kong instance is running
+-- @param prefix (optional) The prefix path where the kong instance is running,
+-- defaults to the prefix in the default config.
 -- @return The conf table of the running instance, or nil + error.
 local function get_running_conf(prefix)
   local default_conf = conf_loader(nil, {prefix = prefix or conf.prefix})
   return conf_loader.load_config_file(default_conf.kong_env)
+end
+
+
+--- Clears the logfile. Will overwrite the logfile with an empty file.
+-- @function clean_logfile
+-- @param logfile (optional) filename to clear, defaults to the current
+-- error-log file
+-- @return nothing
+-- @see line
+local function clean_logfile(logfile)
+  logfile = logfile or (get_running_conf() or conf).nginx_err_logs
+  os.execute(":> " .. logfile)
 end
 
 
@@ -2361,7 +2452,8 @@ local function render_fixtures(conf, env, prefix, fixtures)
     -- prepare the prefix so we get the full config in the
     -- hidden `.kong_env` file, including test specified env vars etc
     assert(kong_exec("prepare --conf " .. conf, env))
-    local render_config = assert(conf_loader(prefix .. "/.kong_env"))
+    local render_config = assert(conf_loader(prefix .. "/.kong_env", nil,
+                                             { from_kong_env = true }))
 
     for _, mocktype in ipairs { "http_mock", "stream_mock" } do
 
@@ -2479,17 +2571,11 @@ local function start_kong(env, tables, preserve_prefix, fixtures)
   local prefix = env.prefix or conf.prefix
 
   -- go plugins are enabled
-  --  set pluginserver dir (making sure it's in the PATH)
-  --  compile fixture go plugins
-  if env.go_plugins_dir then
-    if env.go_plugins_dir == GO_PLUGIN_PATH then
+  --  compile fixture go plugins if any setting mentions it
+  for _,v in pairs(env) do
+    if type(v) == "string" and v:find(GO_PLUGIN_PATH) then
       build_go_plugins(GO_PLUGIN_PATH)
-    end
-
-    if not env.go_pluginserver_exe and not os.getenv("KONG_GO_PLUGINSERVER_EXE") then
-      local ok, _, pluginserver_path, _ = pl_utils.executeex(string.format("which go-pluginserver"))
-      assert(ok, "did not find go-pluginserver in PATH")
-      env.go_pluginserver_exe = pluginserver_path
+      break
     end
   end
 
@@ -2508,7 +2594,7 @@ local function start_kong(env, tables, preserve_prefix, fixtures)
     nginx_conf = " --nginx-conf " .. env.nginx_conf
   end
 
-  if dcbp and not env.declarative_config then
+  if dcbp and not env.declarative_config and not env.declarative_config_string then
     if not config_yml then
       config_yml = prefix .. "/config.yml"
       local cfg = dcbp.done()
@@ -2580,19 +2666,60 @@ local function restart_kong(env, tables, fixtures)
 end
 
 
---- Creates a temporary declarative config file from the current db contents.
--- This can be used in combo with the `all_strategies` iterator to ensure the
--- test config is automatically generated from the DB using the regular helpers.
--- @function write_declarative_file
--- @return filename of the written config file (format will be yaml)
--- @see all_strategies
-local function write_declarative_config()
-  local filename = pl_path.tmpname() .. ".yml"
-  os.remove(filename)
-  assert(kong_exec("config db_export "..filename))
-  return filename
-end
+--- Simulate a Hybrid mode DP and connect to the CP specified in `opts`.
+-- @function clustering_client
+-- @param opts Options to use, the `host`, `port`, `cert` and `cert_key` fields
+-- are required.
+-- Other fields that can be overwritten are:
+-- `node_hostname`, `node_id`, `node_version`, `node_plugins_list`. If absent,
+-- they are automatically filled.
+-- @return msg if handshake succeeded and initial message received from CP or nil, err
+local function clustering_client(opts)
+  assert(opts.host)
+  assert(opts.port)
+  assert(opts.cert)
+  assert(opts.cert_key)
 
+  local c = assert(ws_client:new())
+  local uri = "wss://" .. opts.host .. ":" .. opts.port ..
+              "/v1/outlet?node_id=" .. (opts.node_id or utils.uuid()) ..
+              "&node_hostname=" .. (opts.node_hostname or kong.node.get_hostname()) ..
+              "&node_version=" .. (opts.node_version or KONG_VERSION)
+
+  local conn_opts = {
+    ssl_verify = false, -- needed for busted tests as CP certs are not trusted by the CLI
+    client_cert = assert(ssl.parse_pem_cert(assert(pl_file.read(opts.cert)))),
+    client_priv_key = assert(ssl.parse_pem_priv_key(assert(pl_file.read(opts.cert_key)))),
+    server_name = "kong_clustering",
+  }
+
+  local res, err = c:connect(uri, conn_opts)
+  if not res then
+    return nil, err
+  end
+  local payload = assert(cjson.encode({ type = "basic_info",
+                                        plugins = opts.node_plugins_list or
+                                                  PLUGINS_LIST,
+                                      }))
+  assert(c:send_binary(payload))
+
+  assert(c:send_ping(string.rep("0", 32)))
+
+  local data, typ, err
+  data, typ, err = c:recv_frame()
+  c:close()
+
+  if typ == "binary" then
+    local odata = assert(utils.inflate_gzip(data))
+    local msg = assert(cjson.decode(odata))
+    return msg
+
+  elseif typ == "pong" then
+    return "PONG"
+  end
+
+  return nil, "unknown frame from CP: " .. (typ or err)
+end
 
 
 ----------------
@@ -2694,11 +2821,14 @@ end
   admin_ssl_client = admin_ssl_client,
   prepare_prefix = prepare_prefix,
   clean_prefix = clean_prefix,
+  clean_logfile = clean_logfile,
   wait_for_invalidation = wait_for_invalidation,
   each_strategy = each_strategy,
   all_strategies = all_strategies,
   validate_plugin_config_schema = validate_plugin_config_schema,
-  write_declarative_config = write_declarative_config,
+  clustering_client = clustering_client,
+  https_server = https_server,
+  stress_generator = stress_generator,
 
   -- miscellaneous
   intercept = intercept,
@@ -2707,6 +2837,7 @@ end
   make_yaml_file = make_yaml_file,
   setenv = setenv,
   unsetenv = unsetenv,
+  deep_sort = deep_sort,
 
   -- launching Kong subprocesses
   start_kong = start_kong,
@@ -2771,5 +2902,12 @@ end
     end
 
     return code
+  end,
+
+  -- returns the plugins and version list that is used by Hybrid mode tests
+  get_plugins_list = function()
+    assert(PLUGINS_LIST, "plugin list has not been initialized yet, " ..
+                         "you must call get_db_utils first")
+    return table_clone(PLUGINS_LIST)
   end,
 }

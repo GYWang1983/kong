@@ -98,6 +98,29 @@ for _, strategy in helpers.each_strategy() do
         },
       }
 
+      local route5 = bp.routes:insert {
+        hosts = { "early_termination.example.com" },
+      }
+
+      bp.plugins:insert {
+        route = { id = route5.id },
+        name     = "tcp-log",
+        config   = {
+          host   = "127.0.0.1",
+          port   = TCP_PORT,
+        },
+      }
+
+      bp.plugins:insert {
+        name   = "request-termination",
+        route  = { id = route5.id },
+        config = {
+          status_code  = 200,
+          content_type = "text/plain",
+          body         = "hello!",
+        },
+      }
+
       local tcp_srv = bp.services:insert({
         name = "tcp",
         host = helpers.mock_upstream_host,
@@ -150,6 +173,23 @@ for _, strategy in helpers.each_strategy() do
         },
       }
 
+      local route6 = bp.routes:insert {
+        hosts = { "custom_tcp_logging.com" },
+      }
+
+      bp.plugins:insert {
+        route = { id = route6.id },
+        name     = "tcp-log",
+        config   = {
+          host   = "127.0.0.1",
+          port   = TCP_PORT,
+          custom_fields_by_lua = {
+            new_field = "return 123",
+            route = "return nil", -- unset route field
+          }
+        },
+      }
+
       assert(helpers.start_kong({
         database   = strategy,
         nginx_conf = "spec/fixtures/custom_nginx.template",
@@ -195,6 +235,60 @@ for _, strategy in helpers.each_strategy() do
 
       -- Since it's over HTTP, let's make sure there are no TLS information
       assert.is_nil(log_message.request.tls)
+    end)
+
+    describe("custom log values by lua", function()
+      it("logs custom values", function()
+        local thread = helpers.tcp_server(TCP_PORT) -- Starting the mock TCP server
+
+        -- Making the request
+        local r = assert(proxy_client:send {
+          method  = "GET",
+          path    = "/request",
+          headers = {
+            host  = "custom_tcp_logging.com",
+          },
+        })
+        assert.response(r).has.status(200)
+
+        -- Getting back the TCP server input
+        local ok, res = thread:join()
+        assert.True(ok)
+        assert.is_string(res)
+
+        -- Making sure it's alright
+        local log_message = cjson.decode(res)
+        assert.equal("127.0.0.1", log_message.client_ip)
+
+        -- Since it's over HTTP, let's make sure there are no TLS information
+        assert.same(123, log_message.new_field)
+      end)
+
+      it("unsets existing log values", function()
+        local thread = helpers.tcp_server(TCP_PORT) -- Starting the mock TCP server
+
+        -- Making the request
+        local r = assert(proxy_client:send {
+          method  = "GET",
+          path    = "/request",
+          headers = {
+            host  = "custom_tcp_logging.com",
+          },
+        })
+        assert.response(r).has.status(200)
+
+        -- Getting back the TCP server input
+        local ok, res = thread:join()
+        assert.True(ok)
+        assert.is_string(res)
+
+        -- Making sure it's alright
+        local log_message = cjson.decode(res)
+        assert.equal("127.0.0.1", log_message.client_ip)
+
+        -- Since it's over HTTP, let's make sure there are no TLS information
+        assert.same(nil, log_message.route)
+      end)
     end)
 
     it("logs to TCP (#grpc)", function()
@@ -435,9 +529,30 @@ for _, strategy in helpers.each_strategy() do
       local log_message = cjson.decode(res)
 
       assert.equal("grpcs", log_message.service.protocol)
-      assert.equal("TLSv1.3", log_message.request.tls.version)
+      assert.match("TLSv1.[23]", log_message.request.tls.version)
       assert.is_string(log_message.request.tls.cipher)
       assert.equal("NONE", log_message.request.tls.client_verify)
+    end)
+
+    it("tries field encoded as JSON array instead of object #6390", function()
+      local thread = helpers.tcp_server(TCP_PORT) -- Starting the mock TCP server
+
+      -- Making the request
+      local r = assert(proxy_client:send {
+        method  = "GET",
+        path    = "/request",
+        headers = {
+          host  = "early_termination.example.com",
+        },
+      })
+      assert.response(r).has.status(200)
+
+      -- Getting back the TCP server input
+      local ok, res = thread:join()
+      assert.True(ok)
+      assert.is_string(res)
+
+      assert.matches('"tries":[]', res, nil, true)
     end)
 
     it("#stream reports tcp streams", function()

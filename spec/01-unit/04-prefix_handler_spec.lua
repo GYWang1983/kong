@@ -1,9 +1,28 @@
 local helpers = require "spec.helpers"
 local conf_loader = require "kong.conf_loader"
 local prefix_handler = require "kong.cmd.utils.prefix_handler"
+local ffi = require "ffi"
 
 local exists = helpers.path.exists
 local join = helpers.path.join
+
+local C = ffi.C
+
+
+ffi.cdef([[
+  struct group *getgrnam(const char *name);
+  struct passwd *getpwnam(const char *name);
+]])
+
+
+local function kong_user_group_exists()
+  if C.getpwnam("kong") == nil or C.getgrnam("kong") == nil then
+    return false
+  else
+    return true
+  end
+end
+
 
 describe("NGINX conf compiler", function()
   describe("gen_default_ssl_cert()", function()
@@ -13,6 +32,8 @@ describe("NGINX conf compiler", function()
       ssl_cert_key = "spec/fixtures/kong_spec.key",
       admin_ssl_cert = "spec/fixtures/kong_spec.crt",
       admin_ssl_cert_key = "spec/fixtures/kong_spec.key",
+      status_cert = "spec/fixtures/kong_spec.crt",
+      status_cert_key = "spec/fixtures/kong_spec.key",
     }))
     before_each(function()
       helpers.dir.makepath("ssl_tmp")
@@ -23,46 +44,58 @@ describe("NGINX conf compiler", function()
     describe("proxy", function()
       it("auto-generates SSL certificate and key", function()
         assert(prefix_handler.gen_default_ssl_cert(conf))
-        assert(exists(conf.ssl_cert_default))
-        assert(exists(conf.ssl_cert_key_default))
+        for _, suffix in ipairs({ "", "_ecdsa" }) do
+          assert(exists(conf["ssl_cert_default" .. suffix]))
+          assert(exists(conf["ssl_cert_key_default" .. suffix]))
+        end
       end)
       it("does not re-generate if they already exist", function()
         assert(prefix_handler.gen_default_ssl_cert(conf))
-        local cer = helpers.file.read(conf.ssl_cert_default)
-        local key = helpers.file.read(conf.ssl_cert_key_default)
-        assert(prefix_handler.gen_default_ssl_cert(conf))
-        assert.equal(cer, helpers.file.read(conf.ssl_cert_default))
-        assert.equal(key, helpers.file.read(conf.ssl_cert_key_default))
+        for _, suffix in ipairs({ "", "_ecdsa" }) do
+          local cer = helpers.file.read(conf["ssl_cert_default" .. suffix])
+          local key = helpers.file.read(conf["ssl_cert_key_default" .. suffix])
+          assert(prefix_handler.gen_default_ssl_cert(conf))
+          assert.equal(cer, helpers.file.read(conf["ssl_cert_default" .. suffix]))
+          assert.equal(key, helpers.file.read(conf["ssl_cert_key_default" .. suffix]))
+        end
       end)
     end)
     describe("admin", function()
       it("auto-generates SSL certificate and key", function()
         assert(prefix_handler.gen_default_ssl_cert(conf, "admin"))
-        assert(exists(conf.admin_ssl_cert_default))
-        assert(exists(conf.admin_ssl_cert_key_default))
+        for _, suffix in ipairs({ "", "_ecdsa" }) do
+          assert(exists(conf["admin_ssl_cert_default" .. suffix]))
+          assert(exists(conf["admin_ssl_cert_key_default" .. suffix]))
+        end
       end)
       it("does not re-generate if they already exist", function()
         assert(prefix_handler.gen_default_ssl_cert(conf, "admin"))
-        local cer = helpers.file.read(conf.admin_ssl_cert_default)
-        local key = helpers.file.read(conf.admin_ssl_cert_key_default)
-        assert(prefix_handler.gen_default_ssl_cert(conf, "admin"))
-        assert.equal(cer, helpers.file.read(conf.admin_ssl_cert_default))
-        assert.equal(key, helpers.file.read(conf.admin_ssl_cert_key_default))
+        for _, suffix in ipairs({ "", "_ecdsa" }) do
+          local cer = helpers.file.read(conf["admin_ssl_cert_default" .. suffix])
+          local key = helpers.file.read(conf["admin_ssl_cert_key_default" .. suffix])
+          assert(prefix_handler.gen_default_ssl_cert(conf, "admin"))
+          assert.equal(cer, helpers.file.read(conf["admin_ssl_cert_default" .. suffix]))
+          assert.equal(key, helpers.file.read(conf["admin_ssl_cert_key_default" .. suffix]))
+        end
       end)
     end)
     describe("status", function()
       it("auto-generates SSL certificate and key", function()
         assert(prefix_handler.gen_default_ssl_cert(conf, "status"))
-        assert(exists(conf.status_ssl_cert_default))
-        assert(exists(conf.status_ssl_cert_key_default))
+        for _, suffix in ipairs({ "", "_ecdsa" }) do
+          assert(exists(conf["status_ssl_cert_default" .. suffix]))
+          assert(exists(conf["status_ssl_cert_key_default" .. suffix]))
+        end
       end)
       it("does not re-generate if they already exist", function()
         assert(prefix_handler.gen_default_ssl_cert(conf, "status"))
-        local cer = helpers.file.read(conf.status_ssl_cert_default)
-        local key = helpers.file.read(conf.status_ssl_cert_key_default)
-        assert(prefix_handler.gen_default_ssl_cert(conf, "status"))
-        assert.equal(cer, helpers.file.read(conf.status_ssl_cert_default))
-        assert.equal(key, helpers.file.read(conf.status_ssl_cert_key_default))
+        for _, suffix in ipairs({ "", "_ecdsa" }) do
+          local cer = helpers.file.read(conf["status_ssl_cert_default" .. suffix])
+          local key = helpers.file.read(conf["status_ssl_cert_key_default" .. suffix])
+          assert(prefix_handler.gen_default_ssl_cert(conf, "status"))
+          assert.equal(cer, helpers.file.read(conf["status_ssl_cert_default" .. suffix]))
+          assert.equal(key, helpers.file.read(conf["status_ssl_cert_key_default" .. suffix]))
+        end
       end)
     end)
   end)
@@ -168,6 +201,7 @@ describe("NGINX conf compiler", function()
       assert.not_matches("ssl_certificate", kong_nginx_conf)
       assert.not_matches("ssl_certificate_key", kong_nginx_conf)
       assert.not_matches("ssl_certificate_by_lua_block", kong_nginx_conf)
+      assert.not_matches("ssl_dhparam", kong_nginx_conf)
     end)
     describe("handles client_ssl", function()
       it("on", function()
@@ -224,6 +258,7 @@ describe("NGINX conf compiler", function()
       local conf = assert(conf_loader(nil, {}))
       local nginx_conf = prefix_handler.compile_kong_conf(conf)
       assert.matches("client_max_body_size%s+0", nginx_conf)
+      assert.matches("client_max_body_size%s+10m", nginx_conf)
     end)
     it("writes the client_max_body_size as defined", function()
       local conf = assert(conf_loader(nil, {
@@ -239,10 +274,18 @@ describe("NGINX conf compiler", function()
       local nginx_conf = prefix_handler.compile_kong_conf(conf)
       assert.matches("client_max_body_size%s+1m", nginx_conf)
     end)
+    it("writes the client_max_body_size as defined (admin)", function()
+      local conf = assert(conf_loader(nil, {
+        nginx_admin_client_max_body_size = "50m",
+      }))
+      local nginx_conf = prefix_handler.compile_kong_conf(conf)
+      assert.matches("client_max_body_size%s+50m", nginx_conf)
+    end)
     it("defines the client_body_buffer_size directive by default", function()
       local conf = assert(conf_loader(nil, {}))
       local nginx_conf = prefix_handler.compile_kong_conf(conf)
       assert.matches("client_body_buffer_size%s+8k", nginx_conf)
+      assert.matches("client_body_buffer_size%s+10m", nginx_conf)
     end)
     it("writes the client_body_buffer_size directive as defined", function()
       local conf = assert(conf_loader(nil, {
@@ -257,6 +300,13 @@ describe("NGINX conf compiler", function()
       }))
       local nginx_conf = prefix_handler.compile_kong_conf(conf)
       assert.matches("client_body_buffer_size%s+128k", nginx_conf)
+    end)
+    it("writes the client_body_buffer_size directive as defined (admin)", function()
+      local conf = assert(conf_loader(nil, {
+        nginx_admin_client_body_buffer_size = "50m",
+      }))
+      local nginx_conf = prefix_handler.compile_kong_conf(conf)
+      assert.matches("client_body_buffer_size%s+50m", nginx_conf)
     end)
     it("writes kong_cassandra shm if using Cassandra", function()
       local conf = assert(conf_loader(nil, {
@@ -274,10 +324,14 @@ describe("NGINX conf compiler", function()
     end)
 
     describe("user directive", function()
-      it("is not included by default", function()
+      it("is included by default if the kong user/group exist", function()
         local conf = assert(conf_loader(helpers.test_conf_path))
         local nginx_conf = prefix_handler.compile_nginx_conf(conf)
-        assert.not_matches("user%s+[^;]*;", nginx_conf)
+        if kong_user_group_exists() == true then
+          assert.matches("user kong kong;", nginx_conf)
+        else
+          assert.not_matches("user%s+[^;]*;", nginx_conf)
+        end
       end)
       it("is not included when 'nobody'", function()
         local conf = assert(conf_loader(helpers.test_conf_path, {
@@ -412,6 +466,50 @@ describe("NGINX conf compiler", function()
     end)
 
     describe("injected NGINX directives", function()
+      it("injects proxy_access_log directive", function()
+        local conf = assert(conf_loader(nil, {
+          proxy_access_log = "/dev/stdout",
+          stream_listen = "0.0.0.0:9100",
+          nginx_stream_tcp_nodelay = "on",
+        }))
+        local nginx_conf = prefix_handler.compile_kong_conf(conf)
+        assert.matches("access_log%s/dev/stdout;", nginx_conf)
+        local nginx_conf = prefix_handler.compile_kong_stream_conf(conf)
+        assert.matches("access_log%slogs/access.log%sbasic;", nginx_conf)
+
+        local conf = assert(conf_loader(nil, {
+          proxy_stream_access_log = "/dev/stdout custom",
+          stream_listen = "0.0.0.0:9100",
+          nginx_stream_tcp_nodelay = "on",
+        }))
+        local nginx_conf = prefix_handler.compile_kong_conf(conf)
+        assert.matches("access_log%slogs/access.log;", nginx_conf)
+        local nginx_conf = prefix_handler.compile_kong_stream_conf(conf)
+        assert.matches("access_log%s/dev/stdout%scustom;", nginx_conf)
+      end)
+
+      it("injects proxy_error_log directive", function()
+        local conf = assert(conf_loader(nil, {
+          proxy_error_log = "/dev/stdout",
+          stream_listen = "0.0.0.0:9100",
+          nginx_stream_tcp_nodelay = "on",
+        }))
+        local nginx_conf = prefix_handler.compile_kong_conf(conf)
+        assert.matches("error_log%s/dev/stdout%snotice;", nginx_conf)
+        local nginx_conf = prefix_handler.compile_kong_stream_conf(conf)
+        assert.matches("error_log%slogs/error.log%snotice;", nginx_conf)
+
+        local conf = assert(conf_loader(nil, {
+          proxy_stream_error_log = "/dev/stdout",
+          stream_listen = "0.0.0.0:9100",
+          nginx_stream_tcp_nodelay = "on",
+        }))
+        local nginx_conf = prefix_handler.compile_kong_conf(conf)
+        assert.matches("error_log%slogs/error.log%snotice;", nginx_conf)
+        local nginx_conf = prefix_handler.compile_kong_stream_conf(conf)
+        assert.matches("error_log%s/dev/stdout%snotice;", nginx_conf)
+      end)
+
       it("injects nginx_main_* directives", function()
         local conf = assert(conf_loader(nil, {
           nginx_main_pcre_jit = "on",
@@ -592,6 +690,9 @@ describe("NGINX conf compiler", function()
           local nginx_conf = prefix_handler.compile_kong_conf(conf)
           assert.matches("client_max_body_size%s+0;", nginx_conf)
           assert.matches("client_body_buffer_size%s+8k;", nginx_conf)
+          -- Admin API Defaults:
+          assert.matches("client_max_body_size%s+10m;", nginx_conf)
+          assert.matches("client_body_buffer_size%s+10m;", nginx_conf)
          end)
       end)
     end)
@@ -759,10 +860,14 @@ describe("NGINX conf compiler", function()
           prefix = tmp_config.prefix,
           proxy_listen = "127.0.0.1:8000 ssl",
           admin_listen = "127.0.0.1:8001 ssl",
+          status_listen = "127.0.0.1:8002 ssl",
+          ssl_cipher_suite = "custom",
           ssl_cert = "spec/fixtures/kong_spec.crt",
           ssl_cert_key = "spec/fixtures/kong_spec.key",
           admin_ssl_cert = "spec/fixtures/kong_spec.crt",
           admin_ssl_cert_key = "spec/fixtures/kong_spec.key",
+          status_ssl_cert = "spec/fixtures/kong_spec.crt",
+          status_ssl_cert_key = "spec/fixtures/kong_spec.key",
         })
 
         assert(prefix_handler.prepare_prefix(conf))
@@ -778,12 +883,52 @@ describe("NGINX conf compiler", function()
 
         assert(prefix_handler.prepare_prefix(conf))
         assert.truthy(exists(join(conf.prefix, "ssl")))
-        assert.truthy(exists(conf.ssl_cert_default))
-        assert.truthy(exists(conf.ssl_cert_key_default))
-        assert.truthy(exists(conf.admin_ssl_cert_default))
-        assert.truthy(exists(conf.admin_ssl_cert_key_default))
-        assert.truthy(exists(conf.status_ssl_cert_default))
-        assert.truthy(exists(conf.status_ssl_cert_key_default))
+        for _, suffix in ipairs({ "", "_ecdsa" }) do
+          assert.truthy(exists(conf["ssl_cert_default" .. suffix]))
+          assert.truthy(exists(conf["ssl_cert_key_default" .. suffix]))
+          assert.truthy(exists(conf["admin_ssl_cert_default" .. suffix]))
+          assert.truthy(exists(conf["admin_ssl_cert_key_default" .. suffix]))
+          assert.truthy(exists(conf["status_ssl_cert_default" .. suffix]))
+          assert.truthy(exists(conf["status_ssl_cert_key_default" .. suffix]))
+        end
+      end)
+      it("generates default SSL certs with correct permissions", function()
+        local conf = conf_loader(nil, {
+          prefix = tmp_config.prefix,
+          proxy_listen  = "127.0.0.1:8000 ssl",
+          admin_listen  = "127.0.0.1:8001 ssl",
+          status_listen = "127.0.0.1:8002 ssl",
+        })
+
+        assert(prefix_handler.prepare_prefix(conf))
+        for _, prefix in ipairs({ "", "status_", "admin_" }) do
+          for _, suffix in ipairs({ "", "_ecdsa" }) do
+            local handle = io.popen("ls -l " .. conf[prefix .. "ssl_cert_default" .. suffix])
+            local result = handle:read("*a")
+            handle:close()
+            assert.matches("%-rw%-r[-w]%-r%-%-", result, nil, false)
+
+            handle = io.popen("ls -l " .. conf[prefix .. "ssl_cert_key_default" .. suffix])
+            result = handle:read("*a")
+            handle:close()
+            assert.matches("-rw-------", result, nil, true)
+          end
+        end
+      end)
+      it("generates default SSL DH params", function()
+        local conf = conf_loader(nil, {
+          prefix = tmp_config.prefix,
+          proxy_listen  = "127.0.0.1:8000 ssl",
+          admin_listen  = "127.0.0.1:8001 ssl",
+          status_listen = "127.0.0.1:8002 ssl",
+          stream_listen = "127.0.0.1:7000 ssl",
+        })
+
+        assert(prefix_handler.prepare_prefix(conf))
+        assert.truthy(exists(join(conf.prefix, "ssl")))
+        assert.truthy(exists(join(conf.prefix, "ssl", conf.ssl_dhparam .. ".pem")))
+        assert.truthy(exists(join(conf.prefix, "ssl", conf.nginx_http_ssl_dhparam .. ".pem")))
+        assert.truthy(exists(join(conf.prefix, "ssl", conf.nginx_stream_ssl_dhparam .. ".pem")))
       end)
     end)
 
@@ -1005,4 +1150,3 @@ describe("NGINX conf compiler", function()
     end)
   end)
 end)
-

@@ -914,7 +914,28 @@ describe("schema", function()
           { f = { type = "number", required = true } }
         }
       })
-      assert.falsy(Test:validate({ k = "wat" }))
+      assert.falsy(Test:validate({ f = 1, k = "wat" }))
+    end)
+
+    it("validates on unknown fields with value of null in data plane", function()
+      local Test = Schema.new({
+        fields = {
+          { f = { type = "number", required = true } }
+        }
+      })
+      assert.falsy(Test:validate({ f = 1, k = "wat" }))
+      assert.falsy(Test:validate({ f = 1, k = ngx.null }))
+
+      _G.kong = {
+        configuration = {
+          role = "data_plane",
+        },
+      }
+
+      local ok = Test:validate({ f = 1, k = ngx.null })
+
+      _G.kong = nil
+      assert.truthy(ok)
     end)
 
     local function run_custom_check_producing_error(error)
@@ -3763,6 +3784,78 @@ describe("schema", function()
       local ok, err = TestSchema:process_auto_fields(input)
       assert.falsy(ok)
       assert.same({ user = "expected an array" }, err)
+    end)
+  end)
+
+  describe("get_constraints", function()
+    it("returns empty constraints", function()
+      local test_schema = {
+        name = "test",
+        fields = { { name = { type = "string" }, }, },
+      }
+
+      local TestEntities = Schema.new(test_schema)
+      local constraints = TestEntities:get_constraints()
+
+      assert.are.same({}, constraints)
+    end)
+
+    it("returns constraints", function()
+      local schema1 = {
+        name = "test1",
+        fields = { { name = { type = "string" }, }, }
+      }
+      local schema2 = {
+        name = "test2",
+        fields = {
+          { foreign_reference1 = { type = "foreign", reference = "test1" } },
+        },
+      }
+      local schema3 = {
+        name = "test3",
+        fields = {
+          { foreign_reference2 = { type = "foreign", reference = "test1", on_delete = "cascade" } },
+        },
+      }
+
+      local Entities1 = Schema.new(schema1)
+      assert.is.Truthy(Entities1)
+      local Entities2 = Schema.new(schema2)
+      assert.is.Truthy(Entities2)
+      local Entities3 = Schema.new(schema3)
+      assert.is.Truthy(Entities3)
+      local constraints = Entities1:get_constraints()
+      table.sort(constraints, function(a, b)
+        return a.field_name < b.field_name
+      end)
+
+      assert.are.same({
+        { schema = Entities2, field_name = 'foreign_reference1', on_delete = nil },
+        { schema = Entities3, field_name = 'foreign_reference2', on_delete = "cascade" },
+      }, constraints)
+    end)
+
+    it("merges workspaceable constraints", function()
+      local workspace_schema = {
+        name = "workspaces",
+        fields = { { name = { type = "string" }, }, }
+      }
+      local schema1 = {
+        name = "test4",
+        workspaceable = true,
+        fields = { { name = { type = "string" }, }, }
+      }
+
+      local WorkspaceEntity = Schema.new(workspace_schema)
+      assert.is.Truthy(WorkspaceEntity)
+      local Entities2 = Schema.new(schema1)
+      assert.is.Truthy(Entities2)
+      local constraints = WorkspaceEntity:get_constraints()
+
+      assert.are.same({
+        test4 = true,
+        { schema = Entities2 }
+      }, constraints)
     end)
   end)
 

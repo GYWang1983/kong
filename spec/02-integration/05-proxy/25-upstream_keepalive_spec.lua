@@ -25,7 +25,7 @@ local fixtures = {
 }
 
 
-describe("upstream keepalive", function()
+describe("#postgres upstream keepalive", function()
   local proxy_client
 
   local function start_kong(opts)
@@ -39,8 +39,7 @@ describe("upstream keepalive", function()
       kopts[k] = v
     end
 
-    -- cleanup logs
-    os.execute(":> " .. helpers.test_conf.nginx_err_logs)
+    helpers.clean_logfile()
 
     assert(helpers.start_kong(kopts, nil, nil, fixtures))
 

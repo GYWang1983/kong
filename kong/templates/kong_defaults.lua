@@ -3,16 +3,18 @@ prefix = /usr/local/kong/
 log_level = notice
 proxy_access_log = logs/access.log
 proxy_error_log = logs/error.log
+proxy_stream_access_log = logs/access.log basic
+proxy_stream_error_log = logs/error.log
 admin_access_log = logs/admin_access.log
 admin_error_log = logs/error.log
 status_access_log = off
 status_error_log = logs/status_error.log
 plugins = bundled
-go_pluginserver_exe = /usr/local/bin/go-pluginserver
-go_plugins_dir = off
 port_maps = NONE
 host_ports = NONE
 anonymous_reports = on
+go_pluginserver_exe = /usr/local/bin/go-pluginserver
+go_plugins_dir = off
 
 proxy_listen = 0.0.0.0:8000 reuseport backlog=16384, 0.0.0.0:8443 http2 ssl reuseport backlog=16384
 stream_listen = off
@@ -26,6 +28,9 @@ cluster_mtls = shared
 cluster_ca_cert = NONE
 cluster_server_name = NONE
 cluster_data_plane_purge_delay = 1209600
+cluster_ocsp = off
+cluster_v2 = off
+
 mem_cache_size = 128m
 ssl_cert = NONE
 ssl_cert_key = NONE
@@ -36,6 +41,7 @@ ssl_cipher_suite = intermediate
 ssl_ciphers = NONE
 ssl_protocols = TLSv1.1 TLSv1.2 TLSv1.3
 ssl_prefer_server_ciphers = on
+ssl_dhparam = NONE
 ssl_session_tickets = on
 ssl_session_timeout = 1d
 admin_ssl_cert = NONE
@@ -50,12 +56,12 @@ upstream_keepalive_pool_size = 60
 upstream_keepalive_max_requests = 100
 upstream_keepalive_idle_timeout = 60
 
-nginx_user = nobody nobody
+nginx_user = kong kong
 nginx_worker_processes = auto
 nginx_optimizations = on
 nginx_daemon = on
 nginx_main_daemon = on
-nginx_main_user = nobody nobody
+nginx_main_user = kong kong
 nginx_main_worker_processes = auto
 nginx_main_worker_rlimit_nofile = auto
 nginx_events_worker_connections = auto
@@ -64,20 +70,25 @@ nginx_http_client_max_body_size = 0
 nginx_http_client_body_buffer_size = 8k
 nginx_http_ssl_protocols = NONE
 nginx_http_ssl_prefer_server_ciphers = NONE
+nginx_http_ssl_dhparam = NONE
 nginx_http_ssl_session_tickets = NONE
 nginx_http_ssl_session_timeout = NONE
 nginx_stream_ssl_protocols = NONE
 nginx_stream_ssl_prefer_server_ciphers = NONE
+nginx_stream_ssl_dhparam = NONE
 nginx_stream_ssl_session_tickets = NONE
 nginx_stream_ssl_session_timeout = NONE
 nginx_proxy_real_ip_header = X-Real-IP
 nginx_proxy_real_ip_recursive = off
+nginx_admin_client_max_body_size = 10m
+nginx_admin_client_body_buffer_size = 10m
 nginx_upstream_keepalive = NONE
 nginx_upstream_keepalive_requests = NONE
 nginx_upstream_keepalive_timeout = NONE
 nginx_http_upstream_keepalive = NONE
 nginx_http_upstream_keepalive_requests = NONE
 nginx_http_upstream_keepalive_timeout = NONE
+nginx_http_lua_regex_match_limit = 100000
 
 client_max_body_size = 0
 client_body_buffer_size = 8k
@@ -130,13 +141,14 @@ cassandra_data_centers = dc1:2,dc2:3
 cassandra_schema_consensus_timeout = 10000
 
 declarative_config = NONE
+declarative_config_string = NONE
 
 db_update_frequency = 5
 db_update_propagation = 0
 db_cache_ttl = 0
 db_cache_neg_ttl = NONE
 db_resurrect_ttl = 30
-db_cache_warmup_entities = services, plugins
+db_cache_warmup_entities = services
 
 dns_resolver = NONE
 dns_hostsfile = /etc/hosts
@@ -153,11 +165,17 @@ worker_state_update_frequency = 5
 lua_socket_pool_size = 30
 lua_ssl_trusted_certificate = NONE
 lua_ssl_verify_depth = 1
+lua_ssl_protocols = TLSv1.1 TLSv1.2 TLSv1.3
 lua_package_path = ./?.lua;./?/init.lua;
 lua_package_cpath = NONE
 
 role = traditional
 kic = off
+pluginserver_names = NONE
+
+untrusted_lua = sandbox
+untrusted_lua_sandbox_requires =
+untrusted_lua_sandbox_environment =
 
 static_url_path =
 static_file_path = /kong/static

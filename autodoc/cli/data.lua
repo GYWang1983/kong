@@ -8,7 +8,6 @@ data.header = [[
 #  the files in https://github.com/Kong/kong/tree/master/autodoc/cli
 #
 title: CLI Reference
-skip_read_time: true
 ---
 
 ## Introduction
@@ -41,7 +40,7 @@ data.command_intro = {
 
 data.footer = [[
 
-[configuration-reference]: /{{page.kong_version}}/configuration
+[configuration-reference]: /gateway-oss/{{page.kong_version}}/configuration
 ]]
 
 return data

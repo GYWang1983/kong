@@ -345,6 +345,45 @@ for _, strategy in helpers.each_strategy() do
         assert.equal("Unauthorized", body.message)
       end)
 
+      it("should not pass with username missing", function()
+        local date = os.date("!%a, %d %b %Y %H:%M:%S GMT")
+        local encodedSignature   = ngx.encode_base64(hmac_sha1_binary("secret", "date: " .. date))
+        local hmacAuth = [[hmac algorithm="hmac-sha1",]]
+          .. [[headers="date",signature="]] .. encodedSignature .. [["]]
+        local res = assert(proxy_client:send {
+          method  = "GET",
+          path    = "/request",
+          body    = {},
+          headers = {
+            ["HOST"]      = "hmacauth.com",
+            date          = date,
+            authorization = hmacAuth,
+          },
+        })
+        local body = assert.res_status(401, res)
+        body = cjson.decode(body)
+        assert.same({ message = "HMAC signature cannot be verified" }, body)
+      end)
+
+      it("should not pass with signature missing", function()
+        local date = os.date("!%a, %d %b %Y %H:%M:%S GMT")
+        local hmacAuth = [[hmac username="bob",algorithm="hmac-sha1",]]
+          .. [[headers="date"]]
+        local res = assert(proxy_client:send {
+          method  = "GET",
+          path    = "/request",
+          body    = {},
+          headers = {
+            ["HOST"]      = "hmacauth.com",
+            date          = date,
+            authorization = hmacAuth,
+          },
+        })
+        local body = assert.res_status(401, res)
+        body = cjson.decode(body)
+        assert.same({ message = "HMAC signature cannot be verified" }, body)
+      end)
+
       it("should pass with GET", function()
         local date = os.date("!%a, %d %b %Y %H:%M:%S GMT")
         local encodedSignature   = ngx.encode_base64(hmac_sha1_binary("secret", "date: " .. date))
@@ -370,6 +409,24 @@ for _, strategy in helpers.each_strategy() do
         local encodedSignature   = ngx.encode_base64(hmac_sha1_binary("secret", "date: " .. date))
         local hmacAuth = [[hmac username="bob",algorithm="hmac-sha1",]]
           .. [[headers="date",signature="]] .. encodedSignature .. [["]]
+
+        local ok, res = helpers.proxy_client_grpc(){
+          service = "hello.HelloService.SayHello",
+          opts = {
+            [""] = ("-H 'Date: %s' -H 'Authorization: %s'"):format(date, hmacAuth),
+          },
+        }
+        assert.truthy(ok)
+        assert.same({ reply = "hello noname" }, cjson.decode(res))
+      end)
+
+      it("accepts authorized gRPC calls with @request-target (HTTP/2 test), bug #3789", function()
+        local date = os.date("!%a, %d %b %Y %H:%M:%S GMT")
+        local encodedSignature   = ngx.encode_base64(hmac_sha1_binary("secret", "date: " .. date ..
+                                                                      "\n@request-target: " ..
+                                                                      "post /hello.HelloService/SayHello"))
+        local hmacAuth = [[hmac username="bob",algorithm="hmac-sha1",]]
+          .. [[headers="date @request-target",signature="]] .. encodedSignature .. [["]]
 
         local ok, res = helpers.proxy_client_grpc(){
           service = "hello.HelloService.SayHello",
@@ -488,6 +545,29 @@ for _, strategy in helpers.each_strategy() do
             .. date .. "\n" .. "content-md5: md5" .. "\nGET /request HTTP/1.1"))
         local hmacAuth = [[hmac username="bob",  algorithm="hmac-sha1", ]]
           .. [[headers="date content-md5 request-line", signature="]]
+          .. encodedSignature .. [["]]
+        local res = assert(proxy_client:send {
+          method  = "GET",
+          path    = "/request",
+          body    = {},
+          headers = {
+            ["HOST"]                = "hmacauth.com",
+            date                    = date,
+            ["proxy-authorization"] = hmacAuth,
+            authorization           = "hello",
+            ["content-md5"]         = "md5",
+          },
+        })
+        assert.res_status(200, res)
+      end)
+
+      it("should pass with GET with @request-target", function()
+        local date = os.date("!%a, %d %b %Y %H:%M:%S GMT")
+        local encodedSignature = ngx.encode_base64(
+          hmac_sha1_binary("secret", "date: "
+            .. date .. "\n" .. "content-md5: md5" .. "\n@request-target: get /request"))
+        local hmacAuth = [[hmac username="bob",  algorithm="hmac-sha1", ]]
+          .. [[headers="date content-md5 @request-target", signature="]]
           .. encodedSignature .. [["]]
         local res = assert(proxy_client:send {
           method  = "GET",

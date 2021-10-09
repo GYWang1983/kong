@@ -20,6 +20,7 @@ local check_not_phase = phase_checker.check_not
 local PHASES = phase_checker.phases
 local AUTH_AND_LATER = phase_checker.new(PHASES.access,
                                          PHASES.header_filter,
+                                         PHASES.response,
                                          PHASES.body_filter,
                                          PHASES.log)
 local TABLE_OR_NIL = { ["table"] = true, ["nil"] = true }
@@ -37,7 +38,7 @@ local function new(self)
   -- downstream client.
   --
   -- @function kong.client.get_ip
-  -- @phases certificate, rewrite, access, header_filter, body_filter, log
+  -- @phases certificate, rewrite, access, header_filter, response, body_filter, log
   -- @treturn string ip The remote address of the client making the request
   -- @usage
   -- -- Given a client with IP 127.0.0.1 making connection through
@@ -63,7 +64,7 @@ local function new(self)
   -- * [real\_ip\_recursive](https://getkong.org/docs/latest/configuration/#real_ip_recursive)
   --
   -- @function kong.client.get_forwarded_ip
-  -- @phases certificate, rewrite, access, header_filter, body_filter, log
+  -- @phases certificate, rewrite, access, header_filter, response, body_filter, log
   -- @treturn string ip The remote address of the client making the request,
   -- considering forwarded addresses
   --
@@ -72,7 +73,7 @@ local function new(self)
   -- -- a load balancer with IP 10.0.0.1 to Kong answering the request for
   -- -- https://username:password@example.com:1234/v1/movies
   --
-  -- kong.request.get_forwarded_ip() -- "127.0.0.1"
+  -- kong.client.get_forwarded_ip() -- "127.0.0.1"
   --
   -- -- Note: assuming that 10.0.0.1 is one of the trusted IPs, and that
   -- -- the load balancer adds the right headers matching with the configuration
@@ -90,7 +91,7 @@ local function new(self)
   -- is, in cases when a load balancer is in front of Kong, this function will
   -- return load balancer's port, and **not** that of the downstream client.
   -- @function kong.client.get_port
-  -- @phases certificate, rewrite, access, header_filter, body_filter, log
+  -- @phases certificate, rewrite, access, header_filter, response, body_filter, log
   -- @treturn number The remote client port
   -- @usage
   -- -- [client]:40000 <-> 80:[balancer]:30000 <-> 80:[kong]:20000 <-> 80:[service]
@@ -112,7 +113,7 @@ local function new(self)
   -- * [real\_ip\_header](https://getkong.org/docs/latest/configuration/#real_ip_header)
   -- * [real\_ip\_recursive](https://getkong.org/docs/latest/configuration/#real_ip_recursive)
   -- @function kong.client.get_forwarded_port
-  -- @phases certificate, rewrite, access, header_filter, body_filter, log
+  -- @phases certificate, rewrite, access, header_filter, response, body_filter, log
   -- @treturn number The remote client port, considering forwarded ports
   -- @usage
   -- -- [client]:40000 <-> 80:[balancer]:30000 <-> 80:[kong]:20000 <-> 80:[service]
@@ -132,8 +133,8 @@ local function new(self)
   -- Returns the credentials of the currently authenticated consumer.
   -- If not set yet, it returns `nil`.
   -- @function kong.client.get_credential
-  -- @phases access, header_filter, body_filter, log
-  -- @return the authenticated credential
+  -- @phases access, header_filter, response, body_filter, log
+  -- @treturn string the authenticated credential
   -- @usage
   -- local credential = kong.client.get_credential()
   -- if credential then
@@ -149,12 +150,12 @@ local function new(self)
 
 
   ---
-  -- Returns the consumer from the datastore (or cache).
+  -- Returns the consumer from the datastore.
   -- Will look up the consumer by id, and optionally will do a second search by name.
   -- @function kong.client.load_consumer
-  -- @phases access, header_filter, body_filter, log
+  -- @phases access, header_filter, response, body_filter, log
   -- @tparam string consumer_id The consumer id to look up.
-  -- @tparam [opt] search_by_username boolean. If truthy,
+  -- @tparam[opt] boolean search_by_username. If truthy,
   -- then if the consumer was not found by id,
   -- then a second search by username will be performed
   -- @treturn table|nil consumer entity or nil
@@ -197,7 +198,7 @@ local function new(self)
   -- Returns the `consumer` entity of the currently authenticated consumer.
   -- If not set yet, it returns `nil`.
   -- @function kong.client.get_consumer
-  -- @phases access, header_filter, body_filter, log
+  -- @phases access, header_filter, response, body_filter, log
   -- @treturn table the authenticated consumer entity
   -- @usage
   -- local consumer = kong.client.get_consumer()
@@ -250,8 +251,8 @@ local function new(self)
   -- `"tls"`), or `nil`, if no route has been matched, which can happen when dealing with
   -- erroneous requests.
   -- @function kong.client.get_protocol
-  -- @phases access, header_filter, body_filter, log
-  -- @tparam [opt] allow_terminated boolean. If set, the `X-Forwarded-Proto` header will be checked when checking for https
+  -- @phases access, header_filter, response, body_filter, log
+  -- @tparam[opt] boolean allow_terminated. If set, the `X-Forwarded-Proto` header will be checked when checking for https
   -- @treturn string|nil `"http"`, `"https"`, `"tcp"`, `"tls"` or `nil`
   -- @treturn nil|err nil if success, or error message if failure
   -- @usage

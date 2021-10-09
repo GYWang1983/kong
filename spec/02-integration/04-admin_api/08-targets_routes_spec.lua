@@ -32,6 +32,7 @@ describe("Admin API #" .. strategy, function()
     local fixtures = {
       dns_mock = helpers.dns_mock.new()
     }
+    fixtures.dns_mock.should_fail = true  -- don't fallback to "real" DNS
     fixtures.dns_mock:A {
       name = "custom_localhost",
       address = "127.0.0.1",
@@ -110,6 +111,27 @@ describe("Admin API #" .. strategy, function()
           assert.is_number(json.created_at)
           assert.is_string(json.id)
           assert.are.equal(99, json.weight)
+        end
+      end)
+
+      it_content_types("creates a target with weight = 0", function(content_type)
+        return function()
+          local upstream = bp.upstreams:insert { slots = 10 }
+          local res = assert(client:send {
+            method = "POST",
+            path = "/upstreams/" .. upstream.name .. "/targets/",
+            body = {
+              target = "zero.weight.test:8080",
+              weight = 0,
+            },
+            headers = {["Content-Type"] = content_type}
+          })
+          assert.response(res).has.status(201)
+          local json = assert.response(res).has.jsonbody()
+          assert.equal("zero.weight.test:8080", json.target)
+          assert.is_number(json.created_at)
+          assert.is_string(json.id)
+          assert.are.equal(0, json.weight)
         end
       end)
 
@@ -260,7 +282,7 @@ describe("Admin API #" .. strategy, function()
         }
       end)
 
-      it("only shows active targets", function()
+      it("shows all targets", function()
         for _, append in ipairs({ "", "/" }) do
           local res = assert(client:send {
             method = "GET",
@@ -269,15 +291,16 @@ describe("Admin API #" .. strategy, function()
           assert.response(res).has.status(200)
           local json = assert.response(res).has.jsonbody()
 
-          -- we got three active targets for this upstream
-          assert.equal(3, #json.data)
+          -- we got four active targets for this upstream
+          assert.equal(4, #json.data)
 
           -- when multiple active targets are present, we only see the last one
           assert.equal(apis[4].id, json.data[1].id)
 
           -- validate the remaining returned targets
           assert.equal(apis[3].target, json.data[2].target)
-          assert.equal(apis[1].target, json.data[3].target)
+          assert.equal(apis[2].target, json.data[3].target)
+          assert.equal(apis[1].target, json.data[4].target)
         end
       end)
 
@@ -391,13 +414,13 @@ describe("Admin API #" .. strategy, function()
         it("returns HEALTHCHECKS_OFF for targets that resolve", function()
           add_targets("127.0.0.1:8%d")
           local targets = add_targets("custom_localhost:8%d")
-          check_health_endpoint(targets, 6, "HEALTHCHECKS_OFF")
+          check_health_endpoint(targets, 8, "HEALTHCHECKS_OFF")
         end)
 
         it("returns DNS_ERROR if DNS cannot be resolved", function()
           local targets = add_targets("bad-health-target-%d:80")
 
-          check_health_endpoint(targets, 3, "DNS_ERROR")
+          check_health_endpoint(targets, 4, "DNS_ERROR")
         end)
       end)
 
@@ -431,7 +454,7 @@ describe("Admin API #" .. strategy, function()
 
           local targets = add_targets("bad-target-%d:80")
 
-          check_health_endpoint(targets, 3, "DNS_ERROR")
+          check_health_endpoint(targets, 4, "DNS_ERROR")
 
         end)
 
@@ -439,11 +462,12 @@ describe("Admin API #" .. strategy, function()
 
           local targets = add_targets("custom_localhost:222%d")
 
-          check_health_endpoint(targets, 3, "HEALTHY")
+          check_health_endpoint(targets, 4, "HEALTHY")
 
         end)
 
-        it("returns UNHEALTHY if failure detected", function()
+        -- FIXME this test is flaky in CI only
+        it("#flaky returns UNHEALTHY if failure detected", function()
 
           local targets = add_targets("custom_localhost:222%d")
 
@@ -472,7 +496,7 @@ describe("Admin API #" .. strategy, function()
           -- Give time for active healthchecks to kick in
           ngx.sleep(0.3)
 
-          check_health_endpoint(targets, 3, "UNHEALTHY")
+          check_health_endpoint(targets, 4, "UNHEALTHY")
 
         end)
       end)

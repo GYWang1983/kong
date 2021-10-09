@@ -2,6 +2,8 @@ local helpers = require "spec.helpers"
 local constants = require "kong.constants"
 local cjson = require "cjson"
 local pl_file = require "pl.file"
+local pl_utils = require "pl.utils"
+local pl_stringx = require "pl.stringx"
 
 for _, strategy in helpers.each_strategy() do
   local admin_client
@@ -50,12 +52,18 @@ for _, strategy in helpers.each_strategy() do
         config = {}
       })
 
+      local _, _, path = pl_utils.executeex("which go-pluginserver")
+      path = pl_stringx.strip(path)
+
       assert(helpers.start_kong({
         nginx_conf = "spec/fixtures/custom_nginx.template",
         database = strategy,
         dns_hostsfile = dns_hostsfile,
         plugins = "bundled,reports-api,go-hello",
-        go_plugins_dir = helpers.go_plugin_path,
+        pluginserver_names = "test",
+        pluginserver_test_socket = "/tmp/go_pluginserver.sock",
+        pluginserver_test_query_cmd = path .. " -plugins-directory " .. helpers.go_plugin_path .. " -dump-all-plugins",
+        pluginserver_test_start_cmd = path .. " -plugins-directory " .. helpers.go_plugin_path .. " -kong-prefix /tmp",
         anonymous_reports = true,
       }))
 
@@ -116,29 +124,13 @@ for _, strategy in helpers.each_strategy() do
       proxy_client:close()
     end)
 
-    it("logs the go version in use", function()
-      local proxy_client = assert(helpers.proxy_client())
-      local res = proxy_client:get("/", {
-        headers = { host  = "http-service.test" }
-      })
-      assert.res_status(200, res)
-
-      reports_send_ping(NEW_STATS_PORT)
-
-      local _, reports_data = assert(reports_server:stop())
-      reports_data = cjson.encode(reports_data)
-
-      assert.match("go_version=%d+.%d+.%d*", reports_data)
-      proxy_client:close()
-    end)
-
     it("runs fake 'response' phase", function()
       local proxy_client = assert(helpers.proxy_client())
       local res = proxy_client:get("/", {
         headers = { host  = "http-service.test" }
       })
       assert.res_status(200, res)
-      assert.equal("got from server 'openresty'", res.headers['x-hello-from-go-at-response'])
+      assert.equal("got from server 'mock-upstream/1.0.0'", res.headers['x-hello-from-go-at-response'])
 
     end)
 

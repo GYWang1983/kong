@@ -1,17 +1,19 @@
 #!/bin/bash
 
+scripts_folder=$(dirname "$0")
+
 #-------------------------------------------------------------------------------
 function commit_changelog() {
     if ! git status CHANGELOG.md | grep -q "modified:"
         then
             die "No changes in CHANGELOG.md to commit. Did you write the changelog?"
         fi
-    
+
         git diff CHANGELOG.md
-    
+
         CONFIRM "If everything looks all right, press Enter to commit" \
                   "or Ctrl-C to cancel."
-    
+
         set -e
         git add CHANGELOG.md
         git commit -m "docs(changelog) add $1 changes"
@@ -19,17 +21,44 @@ function commit_changelog() {
 }
 
 #-------------------------------------------------------------------------------
+function update_copyright() {
+   if ! "$scripts_folder/update-copyright"
+   then
+      die "Could not update copyright file. Check logs for missing licenses, add hardcoded ones if needed"
+   fi
+
+   git add COPYRIGHT
+
+   git commit -m "docs(COPYRIGHT) update copyright for $1"
+   git log -n 1
+}
+
+#-------------------------------------------------------------------------------
+function update_admin_api_def() {
+   if ! "$scripts_folder/gen-admin-api-def.sh"
+   then
+      die "Could not update kong-admin-api.yml file. Check script output for any error messages."
+   fi
+
+   git add kong-admin-api.yml
+
+   git commit -m "docs(kong-admin-api.yml) update Admin API definition for $1"
+   git log -n 1
+}
+
+
+#-------------------------------------------------------------------------------
 function bump_homebrew() {
-   curl -L -o "kong-$version.tar.gz" "https://bintray.com/kong/kong-src/download_file?file_path=kong-$version.tar.gz"
+   curl -L -o "kong-$version.tar.gz" "https://download.konghq.com/gateway-src/kong-$version.tar.gz"
    sum=$(sha256sum "kong-$version.tar.gz" | awk '{print $1}')
-   sed -i 's/kong-[0-9.]*.tar.gz/kong-'$version'.tar.gz/' Formula/kong.rb
-   sed -i 's/sha256 ".*"/sha256 "'$sum'"/' Formula/kong.rb
+   sed -i.bak 's/KONG_VERSION = "[0-9.]*"/KONG_VERSION = "'$version'"/' Formula/kong.rb
+   sed -i.bak 's/sha256 ".*"/sha256 "'$sum'"/' Formula/kong.rb
 }
 
 #-------------------------------------------------------------------------------
 function bump_vagrant() {
-   sed -i 's/version = "[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"/version = "'$version'"/' Vagrantfile
-   sed -i 's/`[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*`/`'$version'`/' README.md
+   sed -i.bak 's/version = "[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"/version = "'$version'"/' Vagrantfile
+   sed -i.bak 's/`[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*`/`'$version'`/' README.md
 }
 
 #-------------------------------------------------------------------------------
@@ -92,7 +121,7 @@ function bump_docs_kong_versions() {
                state = "edition"
             end
          elseif state == "edition" then
-            if line:match("^  edition.*community.*") then
+            if line:match("^  edition.*gateway%-oss.*") then
                fd_out:write("  version: \"'$version'\"\n")
                state = "wait_for_luarocks_version"
             else
@@ -178,25 +207,55 @@ function prepare_changelog() {
    mv CHANGELOG.md.new CHANGELOG.md
 }
 
-#-------------------------------------------------------------------------------	
-function step() {	
-   box="   "	
-   color="$nocolor"	
-   if [ "$version" != "<x.y.z>" ]	
-   then	
-      if [ -e "/tmp/.step-$1-$version" ]	
-      then	
-         color="$green"	
-         box="[x]"	
-      else	
-         color="$bold"	
-         box="[ ]"	
-      fi	
-   fi	
-   echo -e "$color $box Step $c) $2"	
-   echo "        $0 $version $1 $3"	
-   echo -e "$nocolor"	
-   c="$[c+1]"	
+#-------------------------------------------------------------------------------
+function prepare_patch_announcement() {
+  local version="$1.$2.$3"
+
+  cat <<EOF
+============= USE BELOW ON KONG NATION ANNOUNCEMENT ==============
+TITLE: Kong $version available!
+
+BODY:
+We’re happy to announce **Kong $version**. As a patch release, it contains only **bugfixes**; no new features neither breaking changes.
+
+:package: Download [Kong $version](https://download.konghq.com) and [upgrade your cluster](https://github.com/Kong/kong/blob/master/UPGRADE.md#upgrade-to-$1$2x)!
+:spiral_notepad: More info and PR links are available at the [$version Changelog](https://github.com/Kong/kong/blob/master/CHANGELOG.md#$1$2$3).
+
+:whale: The updated official Docker image is available on [Docker Hub ](https://hub.docker.com/_/kong).
+
+As always, Happy Konging! :gorilla:
+============= USE BELOW ON KONG NATION ANNOUNCEMENT ==============
+We’re happy to announce *Kong $version*. As a patch release, it contains only *bugfixes*; no new features neither breaking changes.
+
+:package: Download Kong $version: https://download.konghq.com
+:spiral_note_pad: More info and PR links are available at the $version Changelog: https://github.com/Kong/kong/blob/master/CHANGELOG.md#$1$2$3
+
+:whale: the updated official docker image is available on Docker Hub: https://hub.docker.com/_/kong
+
+As always, happy Konging! :gorilla:
+==================================================================
+EOF
+}
+
+#-------------------------------------------------------------------------------
+function step() {
+   box="   "
+   color="$nocolor"
+   if [ "$version" != "<x.y.z>" ]
+   then
+      if [ -e "/tmp/.step-$1-$version" ]
+      then
+         color="$green"
+         box="[x]"
+      else
+         color="$bold"
+         box="[ ]"
+      fi
+   fi
+   echo -e "$color $box Step $c) $2"
+   echo "        $0 $version $1 $3"
+   echo -e "$nocolor"
+   c="$[c+1]"
 }
 
 #-------------------------------------------------------------------------------
@@ -209,10 +268,10 @@ function update_docker {
         git clone https://github.com/kong/docker-kong
         cd docker-kong
     fi
-    
+
     git pull
     git checkout -B "release/$1"
-    
+
     set -e
     ./update.sh "$1"
 }

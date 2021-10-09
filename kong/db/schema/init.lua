@@ -1088,6 +1088,11 @@ validate_fields = function(self, input)
       elseif self.unknown_field_handler == 'ignore' then
         kong.log.debug("ignoring unknown field: ", err)
         input[k] = nil
+      elseif err == validation_errors.UNKNOWN and v == null and
+        kong and kong.configuration and
+        kong.configuration.role == "data_plane" then -- luacheck: ignore
+        -- extra fields with value of null in the input config are ignored
+        -- otherwise record the error
       else
         errors[k] = err
       end
@@ -1786,9 +1791,9 @@ function Schema:validate(input, full_check, original_input, rbw_entity)
 end
 
 
--- Iterate through input fields on update and check agianst schema for
+-- Iterate through input fields on update and check against schema for
 -- immutable attribute. If immutable attribute is set, compare input values
--- against entity values to detirmine whether input is valid.
+-- against entity values to determine whether input is valid.
 -- @param input The input table.
 -- @param entity The entity update will be performed on.
 -- @return True on success.
@@ -2015,7 +2020,11 @@ function Schema:get_constraints()
     return _workspaceable
   end
 
-  return _cache[self.name].constraints
+  local constraints = {}
+  for _, c in pairs(_cache[self.name].constraints) do
+    table.insert(constraints, c)
+  end
+  return constraints
 end
 
 
@@ -2146,11 +2155,14 @@ function Schema.new(definition, is_subschema)
       if not is_subschema then
         -- Store the inverse relation for implementing constraints
         local constraints = assert(_cache[field.reference]).constraints
-        table.insert(constraints, {
-          schema     = self,
-          field_name = key,
-          on_delete  = field.on_delete,
-        })
+        -- Set logic to prevent duplicates when Schema is initialized multiple times
+        if self.name then
+          constraints[self.name] = {
+            schema     = self,
+            field_name = key,
+            on_delete  = field.on_delete,
+          }
+        end
       end
     end
   end
