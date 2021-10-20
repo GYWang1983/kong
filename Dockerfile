@@ -1,15 +1,15 @@
 FROM 10.20.42.253/library/kong:2.2.1
 
-#USER root
+USER root
 RUN /bin/sh -c set -ex \
-    && sudo sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
+    && sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
     # && apk add --no-cache libuuid \
-    && sudo apk add libxml2 \
-    && sudo apk add --no-cache --virtual .build-deps gcc g++ musl-dev zlib-dev \
+    && apk add libxml2 \
+    && apk add --no-cache --virtual .build-deps gcc g++ musl-dev zlib-dev \
     && luarocks install lua-zlib \
     && luarocks install xmlua \
-    && sudo apk del .build-deps
-#USER kong
+    && apk del .build-deps
+USER kong
 
 COPY kong/db/strategies/postgres/init.lua /usr/local/share/lua/5.1/kong/db/strategies/postgres/init.lua
 COPY kong/db/schema/init.lua /usr/local/share/lua/5.1/kong/db/schema/init.lua
