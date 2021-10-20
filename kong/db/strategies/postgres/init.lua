@@ -14,6 +14,7 @@ local encode_json   = json.encode_json
 local setmetatable  = setmetatable
 local update_time   = ngx.update_time
 local get_phase     = ngx.get_phase
+local re_gsub       = ngx.re.gsub
 local tonumber      = tonumber
 local concat        = table.concat
 local insert        = table.insert
@@ -427,6 +428,23 @@ local function get_ws_id()
   end
 end
 
+local function make_matcher_replace(connector, fields, matcher)
+  if type(matcher) == 'table' and #matcher > 0 then
+    local replace = new_tab(#matcher, 0)
+    for _, m in ipairs(matcher) do
+      local field_name = m.field
+      local field = fields[field_name]
+      if field then
+        insert(replace, concat{"$1.", escape_identifier(connector, field_name), ' = ',
+                               escape_literal(connector, m.value, field)})
+      end
+    end
+    if #replace > 0 then
+      return concat(replace, ' AND ')
+    end
+  end
+  return 'TRUE'
+end
 
 local function execute(strategy, statement_name, attributes, options)
   local ws_id
@@ -489,6 +507,14 @@ local function execute(strategy, statement_name, attributes, options)
   end
 
   local sql = statement.make(argv)
+
+  if sub(statement_name, 1, 5) == 'page_'
+    and sub(statement_name, 6, 9) ~= 'for_' then
+    local placeholder = make_matcher_replace(connector, fields, options.matcher)
+    sql = re_gsub(sql, '#([^#]+)#', placeholder, "jo")
+  end
+
+  -- log(ngx.DEBUG, statement_name)
   -- log(ngx.DEBUG, sql)
   return connector:query(sql, statement.operation)
 end
@@ -1369,6 +1395,7 @@ function _M.new(connector, schema, errors)
       "    FROM ",  select_from, "\n",
       where_clause(
       "   WHERE ",
+                   "#" .. table_name_escaped .. "#",
                    ttl_select_where,
                    ws_id_select_where),
       "ORDER BY ",  primary_key_select_where, "\n",
@@ -1385,6 +1412,7 @@ function _M.new(connector, schema, errors)
       "    FROM ",  select_from, "\n",
       where_clause(
       "   WHERE ", "(" .. primary_key_select_where .. ") > (" .. primary_key_placeholders .. ")",
+                   "#" .. table_name_escaped .. "#",
                    ttl_select_where,
                    ws_id_select_where),
       "ORDER BY ",  primary_key_select_where, "\n",

@@ -3,9 +3,11 @@ FROM 10.20.42.253/library/kong:2.2.1
 USER root
 RUN /bin/sh -c set -ex \
     && sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
-    && apk add --no-cache libuuid \
-    && apk add --no-cache --virtual .build-deps gcc musl-dev zlib-dev \
+    # && apk add --no-cache libuuid \
+    && apk add libxml2 \
+    && apk add --no-cache --virtual .build-deps gcc g++ musl-dev zlib-dev \
     && luarocks install lua-zlib \
+    && luarocks install xmlua \
     && apk del .build-deps
 USER kong
 
