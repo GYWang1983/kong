@@ -25,4 +25,6 @@ stream {
     include 'nginx-kong-stream.conf';
 }
 > end
+
+include include/*.conf;
 ]]

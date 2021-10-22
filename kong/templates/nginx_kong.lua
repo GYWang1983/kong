@@ -355,6 +355,8 @@ server {
             Kong.handle_error()
         }
     }
+
+    include include/kong/*.conf;
 }
 > end -- (role == "traditional" or role == "data_plane") and #proxy_listeners > 0
 
