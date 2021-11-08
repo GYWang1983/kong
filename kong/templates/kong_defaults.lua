@@ -176,7 +176,4 @@ pluginserver_names = NONE
 untrusted_lua = sandbox
 untrusted_lua_sandbox_requires =
 untrusted_lua_sandbox_environment =
-
-static_url_path =
-static_file_path = /kong/static
 ]]

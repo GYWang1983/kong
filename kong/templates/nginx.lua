@@ -14,6 +14,8 @@ events {
 > end
 }
 
+include include/*.conf;
+
 > if role == "control_plane" or #proxy_listeners > 0 or #admin_listeners > 0 or #status_listeners > 0 then
 http {
     include 'nginx-kong.conf';
@@ -25,6 +27,4 @@ stream {
     include 'nginx-kong-stream.conf';
 }
 > end
-
-include include/*.conf;
 ]]

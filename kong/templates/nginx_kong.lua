@@ -163,18 +163,6 @@ server {
         proxy_pass            $upstream_scheme://kong_upstream$upstream_uri;
     }
 
-> if static_url_path then
-    location ${{STATIC_URL_PATH}} {
-        set $ctx_ref                     '';
-        set $kong_proxy_mode             'file';
-        if ($request_filename ~ .*\.(htm|html)$) {
-            add_header Cache-Control no-cache;
-        }
-        root ${{STATIC_FILE_PATH}};
-        index index.htm index.html;
-    }
-> end
-
     location @unbuffered {
         internal;
         default_type         '';

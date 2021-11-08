@@ -732,10 +732,6 @@ end
 
 function Kong.rewrite()
   local proxy_mode = var.kong_proxy_mode
-  if proxy_mode == 'file' then
-    return
-  end
-
   if proxy_mode == "grpc" or proxy_mode == "unbuffered"  then
     kong_resty_ctx.apply_ref()    -- if kong_proxy_mode is gRPC/unbuffered, this is executing
     local ctx = ngx.ctx           -- after an internal redirect. Restore (and restash)
@@ -788,11 +784,6 @@ end
 
 
 function Kong.access()
-  local proxy_mode = var.kong_proxy_mode
-  if proxy_mode == 'file' then
-    return
-  end
-
   local ctx = ngx.ctx
   if not ctx.KONG_ACCESS_START then
     ctx.KONG_ACCESS_START = get_now_ms()
@@ -1117,11 +1108,6 @@ end
 
 
 function Kong.header_filter()
-  local proxy_mode = var.kong_proxy_mode
-  if proxy_mode == 'file' then
-    return
-  end
-
   local ctx = ngx.ctx
   if not ctx.KONG_PROCESSING_START then
     ctx.KONG_PROCESSING_START = start_time() * 1000
@@ -1194,11 +1180,6 @@ end
 
 
 function Kong.body_filter()
-  local proxy_mode = var.kong_proxy_mode
-  if proxy_mode == 'file' then
-    return
-  end
-
   local ctx = ngx.ctx
   if not ctx.KONG_BODY_FILTER_START then
     ctx.KONG_BODY_FILTER_START = get_now_ms()
@@ -1275,11 +1256,6 @@ end
 
 
 function Kong.log()
-  local proxy_mode = var.kong_proxy_mode
-  if proxy_mode == 'file' then
-    return
-  end
-
   local ctx = ngx.ctx
   if not ctx.KONG_LOG_START then
     ctx.KONG_LOG_START = get_now_ms()
