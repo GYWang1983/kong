@@ -1,11 +1,20 @@
 FROM kong:2.5.1
 
+ARG proxy=""
+
 USER root
 RUN /bin/sh -c set -ex \
-    && sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
+    # && sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories \
     # && apk add --no-cache libuuid \
-    && apk add libxml2 \
+    && apk add libxml2
+
+#RUN if [ -n $proxy ]; then git config --global http.proxy $proxy; fi
+
+RUN /bin/sh -c set -ex \
     && apk add --no-cache --virtual .build-deps gcc g++ musl-dev zlib-dev \
+    #&& git config --global http.proxy http://docker.for.mac.host.internal:1087 \
+    && git config --global url."https://github.com/".insteadOf git://github.com/ \
+    && git config --global http.version HTTP/1.1 \
     && luarocks install lua-zlib \
     && luarocks install xmlua \
     && apk del .build-deps
