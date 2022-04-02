@@ -6,6 +6,9 @@ WIN_SCRIPTS = "bin/busted" "bin/kong"
 BUSTED_ARGS ?= -v
 TEST_CMD ?= bin/busted $(BUSTED_ARGS)
 
+IMAGE_NAME ?= package.hundsun.com/orca1.0-docker-test-local/orca/kong
+IMAGE_TAG ?= 2.5.1-orca-20220401-1
+
 ifeq ($(OS), darwin)
 OPENSSL_DIR ?= /usr/local/opt/openssl
 GRPCURL_OS ?= osx
@@ -163,3 +166,10 @@ fix-windows:
 	  rm $$script.win ; \
 	  chmod 0755 $$script ; \
 	done;
+
+docker-buildx:
+	docker buildx build \
+        --builder kong \
+		--platform linux/amd64,linux/arm64 \
+        --push \
+        -t $(IMAGE_NAME):$(IMAGE_TAG) .
