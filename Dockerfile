@@ -26,3 +26,5 @@ COPY kong/db/strategies/postgres/init.lua /usr/local/share/lua/5.1/kong/db/strat
 COPY kong/cache/init.lua /usr/local/share/lua/5.1/kong/cache/init.lua
 COPY kong/tools/kong-lua-sandbox.lua /usr/local/share/lua/5.1/kong/tools/kong-lua-sandbox.lua
 COPY kong/templates/nginx.lua kong/templates/nginx_kong.lua /usr/local/share/lua/5.1/kong/templates/
+
+COPY resty-patch/websocket/client.lua /usr/local/openresty/lualib/resty/websocket/client.lua
