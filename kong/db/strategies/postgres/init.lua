@@ -428,19 +428,28 @@ local function get_ws_id()
   end
 end
 
-local function make_matcher_replace(connector, fields, matcher)
+local function make_matcher_replace(connector, fields, matcher, conjunction)
   if type(matcher) == 'table' and #matcher > 0 then
     local replace = new_tab(#matcher, 0)
     for _, m in ipairs(matcher) do
-      local field_name = m.field
-      local field = fields[field_name]
-      if field then
-        insert(replace, concat{"$1.", escape_identifier(connector, field_name), ' = ',
-                               escape_literal(connector, m.value, field)})
+      local field_name, value = m.field, m.value
+      local operator = m.op or '='
+      local field_meta = fields[field_name]
+      if type(value) == 'table' then
+        local array = new_tab(#value, 0)
+        for _, v in ipairs(array) do
+          insert(array, escape_literal(connector, v, field_meta))
+        end
+        value = insert({'(', concat(array, ','), ')'})
+      else
+        value = escape_literal(connector, m.value, field_meta)
+      end
+      if field_meta then
+        insert(replace, concat{ "$1.", escape_identifier(connector, field_name), ' ', upper(operator), ' ', value })
       end
     end
     if #replace > 0 then
-      return concat(replace, ' AND ')
+      return concat(replace, ' ' .. conjunction .. ' ')
     end
   end
   return 'TRUE'
@@ -510,7 +519,7 @@ local function execute(strategy, statement_name, attributes, options)
 
   if sub(statement_name, 1, 5) == 'page_'
     and sub(statement_name, 6, 9) ~= 'for_' then
-    local placeholder = make_matcher_replace(connector, fields, options.matcher)
+    local placeholder = make_matcher_replace(connector, fields, options.matcher, 'AND')
     sql = re_gsub(sql, '#([^#]+)#', placeholder, "jo")
   end
 
