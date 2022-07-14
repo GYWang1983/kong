@@ -428,24 +428,40 @@ local function get_ws_id()
   end
 end
 
-local function make_matcher_replace(connector, fields, matcher, conjunction)
+local function escape_literal_values(connector, value, field_schema)
+  if type(value) == 'table' then
+    local array = new_tab(#value, 0)
+    for _, v in ipairs(value) do
+      insert(array, escape_literal(connector, v, field_schema))
+    end
+    return concat({'(', concat(array, ','), ')'})
+  else
+    return escape_literal(connector, value, field_schema)
+  end
+end
+
+local function make_matcher_replace(connector, fields, joins, matcher, conjunction)
   if type(matcher) == 'table' and #matcher > 0 then
     local replace = new_tab(#matcher, 0)
     for _, m in ipairs(matcher) do
       local field_name, value = m.field, m.value
       local operator = m.op or '='
-      local field_meta = fields[field_name]
-      if type(value) == 'table' then
-        local array = new_tab(#value, 0)
-        for _, v in ipairs(array) do
-          insert(array, escape_literal(connector, v, field_meta))
+      local table_name
+      if m.schema then
+        if joins and joins[m.schema] then
+          local foreign_schema = joins[m.schema]['foreign']
+          local foreign_field = foreign_schema['fields'][field_name]
+          if foreign_field then
+            table_name = escape_identifier(connector, m.schema)
+            value = escape_literal_values(connector, value, foreign_field)
+          end
         end
-        value = insert({'(', concat(array, ','), ')'})
-      else
-        value = escape_literal(connector, m.value, field_meta)
+      elseif fields[field_name] then
+        table_name = "$1"
+        value = escape_literal_values(connector, value, fields[field_name])
       end
-      if field_meta then
-        insert(replace, concat{ "$1.", escape_identifier(connector, field_name), ' ', upper(operator), ' ', value })
+      if table_name then
+        insert(replace, concat{ table_name, ".", escape_identifier(connector, field_name), ' ', upper(operator), ' ', value })
       end
     end
     if #replace > 0 then
@@ -519,7 +535,8 @@ local function execute(strategy, statement_name, attributes, options)
 
   if sub(statement_name, 1, 5) == 'page_'
     and sub(statement_name, 6, 9) ~= 'for_' then
-    local placeholder = make_matcher_replace(connector, fields, options.matcher, 'AND')
+    local joins = statement.joins
+    local placeholder = make_matcher_replace(connector, fields, joins, options.matcher, 'AND')
     sql = re_gsub(sql, '#([^#]+)#', placeholder, "jo")
   end
 
@@ -958,6 +975,7 @@ function _M.new(connector, schema, errors)
       end
 
       foreign_keys[field_name] = {
+        foreign  = foreign_schema,
         names    = foreign_key_names,
         escaped  = foreign_key_escaped,
         cols     = foreign_col_names,
@@ -1384,6 +1402,7 @@ function _M.new(connector, schema, errors)
     expr = joined_expressions or select_expressions,
     argn = primary_key_names,
     argv = primary_key_args,
+    joins = table_joins,
     code = {
       "SELECT ",  (joined_expressions or select_expressions), "\n",
       "  FROM ",  select_from, "\n",
@@ -1399,6 +1418,7 @@ function _M.new(connector, schema, errors)
     operation = "read",
     argn = { LIMIT },
     argv = single_args,
+    joins = table_joins,
     code = {
       "  SELECT ",  (joined_expressions or select_expressions), "\n",
       "    FROM ",  select_from, "\n",
@@ -1416,6 +1436,7 @@ function _M.new(connector, schema, errors)
     operation = "read",
     argn = page_next_names,
     argv = page_next_args,
+    joins = table_joins,
     code = {
       "  SELECT ",  (joined_expressions or select_expressions), "\n",
       "    FROM ",  select_from, "\n",
@@ -1467,6 +1488,7 @@ function _M.new(connector, schema, errors)
         operation = "read",
         argn = argn_first,
         argv = argv_first,
+        joins = table_joins,
         code = {
           "  SELECT ",  (joined_expressions or select_expressions), "\n",
           "    FROM ",  select_from, "\n",
@@ -1483,6 +1505,7 @@ function _M.new(connector, schema, errors)
         operation = "read",
         argn = argn_next,
         argv = argv_next,
+        joins = table_joins,
         code = {
           "  SELECT ",  (joined_expressions or select_expressions), "\n",
           "    FROM ",  select_from, "\n",
@@ -1525,6 +1548,7 @@ function _M.new(connector, schema, errors)
         operation = "read",
         argn = argn_first,
         argv = {},
+        joins = table_joins,
         code = {
           "  SELECT ",  (joined_expressions or select_expressions), "\n",
           "    FROM ",  select_from, "\n",
@@ -1541,6 +1565,7 @@ function _M.new(connector, schema, errors)
         operation = "read",
         argn = argn_next,
         argv = {},
+        joins = table_joins,
         code = {
           "  SELECT ",  (joined_expressions or select_expressions), "\n",
           "    FROM ",  select_from, "\n",
@@ -1584,6 +1609,7 @@ function _M.new(connector, schema, errors)
         operation = "read",
         argn = single_names,
         argv = single_args,
+        joins = table_joins,
         code = {
           "SELECT ",  (joined_expressions or select_expressions), "\n",
           "  FROM ",  select_from, "\n",
