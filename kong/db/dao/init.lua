@@ -477,7 +477,8 @@ local function check_insert(self, entity, options)
     end
   end
 
-  if self.schema.cache_key and #self.schema.cache_key > 1 then
+  local ck_definition = self.schema.cache_key
+  if ck_definition and (type(ck_definition) == 'function' or #ck_definition > 1) then
     entity_to_insert.cache_key = self:cache_key(entity_to_insert)
   end
 
@@ -554,7 +555,8 @@ local function check_update(self, key, entity, options, name)
     end
   end
 
-  if self.schema.cache_key and #self.schema.cache_key > 1 then
+  local ck_definition = self.schema.cache_key
+  if ck_definition and (type(ck_definition) == 'function' or #ck_definition > 1) then
     entity_to_update.cache_key = self:cache_key(entity_to_update)
   end
 
@@ -622,7 +624,8 @@ local function check_upsert(self, key, entity, options, name)
     end
   end
 
-  if self.schema.cache_key and #self.schema.cache_key > 1 then
+  local ck_definition = self.schema.cache_key
+  if ck_definition and (type(ck_definition) == 'function' or #ck_definition > 1) then
     entity_to_upsert.cache_key = self:cache_key(entity_to_upsert)
   end
 
@@ -648,6 +651,8 @@ local function find_cascade_delete_entities(self, entity, show_ws_id)
         insert(entries, { dao = dao, entity = row })
       end
     end
+
+    ::continue::
   end
 
   return entries
@@ -1314,7 +1319,7 @@ function DAO:select_by_cache_key(cache_key, options)
     cache_key = self:cache_key(cache_key)
   end
 
-  if #ck_definition == 1 then
+  if type(ck_definition) ~= 'function' and #ck_definition == 1 then
     return self["select_by_" .. ck_definition[1]](self, cache_key, options)
   end
 
@@ -1458,6 +1463,11 @@ function DAO:cache_key(key, arg2, arg3, arg4, arg5, ws_id)
     ws_id = ws_id or workspaces.get_workspace_id()
   end
 
+  -- Customer defined cache key function
+  if type(self.schema.cache_key) == 'function' then
+    return self.schema.cache_key(key, arg2, arg3, arg4, arg5, ws_id)
+  end
+
   -- Fast path: passing the cache_key/primary_key entries in
   -- order as arguments, this produces the same result as
   -- the generic code below, but building the cache key
@@ -1479,7 +1489,7 @@ function DAO:cache_key(key, arg2, arg3, arg4, arg5, ws_id)
     error("key must be a string or an entity table", 2)
   end
 
-  if key.ws_id then
+  if key.ws_id and self.schema.workspaceable then
     ws_id = key.ws_id
   end
 

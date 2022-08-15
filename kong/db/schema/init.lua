@@ -1133,6 +1133,9 @@ validate_fields = function(self, input)
       field, err = resolve_field(self, k, field, subschema)
       if field then
         _, errors[k] = self:validate_field(field, v)
+      elseif self.unknown_field_handler == 'ignore' then
+        kong.log.debug("ignoring unknown field: ", err)
+        input[k] = nil
       elseif err == validation_errors.UNKNOWN and v == null and
             kong and kong.configuration and
             kong.configuration.role == "data_plane" then -- luacheck: ignore
@@ -2289,7 +2292,7 @@ function Schema.new(definition, is_subschema)
   setmetatable(self, Schema)
 
   local cache_key = self.cache_key
-  if cache_key then
+  if cache_key and type(cache_key) == 'table' then
     self.cache_key_set = {}
     for i = 1, #cache_key do
       self.cache_key_set[cache_key[i]] = true

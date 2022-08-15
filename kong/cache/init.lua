@@ -193,9 +193,9 @@ function _M:get_bulk(bulk, opts)
 end
 
 
-function _M:safe_set(key, value, shadow)
-  local str_marshalled, err = marshall(value, self.mlcache.ttl,
-                                       self.mlcache.neg_ttl)
+function _M:safe_set(key, value, shadow, ttl, neg_ttl)
+  local str_marshalled, err = marshall(value, ttl or self.mlcache.ttl,
+    neg_ttl or self.mlcache.neg_ttl)
   if err then
     return nil, err
   end

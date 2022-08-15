@@ -81,6 +81,7 @@ local field_schema = {
   { generate_admin_api = { type = "boolean" }, },
   { legacy = { type = "boolean" }, },
   { immutable = { type = "boolean" }, },
+  { join_fields = { type = "array", elements = { type = "string" } }, },
   { err = { type = "string" } },
   { encrypted = { type = "boolean" }, },
   { referenceable = { type = "boolean" }, },
@@ -304,7 +305,7 @@ local meta_errors = {
   FIELDS_ARRAY = "each entry in fields must be a sub-table",
   FIELDS_KEY = "each key in fields must be a string",
   ENDPOINT_KEY = "value must be a field name",
-  CACHE_KEY = "values must be field names",
+  CACHE_KEY = "values must be field names or function",
   CACHE_KEY_UNIQUE = "a field used as a single cache key must be unique",
   TTL_RESERVED = "ttl is a reserved field name when ttl is enabled",
   SUBSCHEMA_KEY = "value must be a field name",
@@ -569,6 +570,12 @@ local MetaSchema = Schema.new({
       },
     },
     {
+      physical_name = {
+        type = "string",
+        nilable = true
+      }
+    },
+    {
       primary_key = {
         type = "array",
         elements = { type = "string" },
@@ -589,10 +596,10 @@ local MetaSchema = Schema.new({
     },
     {
       cache_key = {
-        type = "array",
-        elements = {
-          type = "string",
-        },
+        type = "any",
+        --elements = {
+        --  type = "string",
+        --},
         nilable = true,
       },
     },
@@ -600,6 +607,14 @@ local MetaSchema = Schema.new({
       ttl = {
         type = "boolean",
         nilable = true,
+      }
+    },
+    {
+      unknown_field_handler = {
+        type = "string",
+        nilable = true,
+        one_of = {"error", "ignore", "preserve"},
+        default = "error"
       }
     },
     {
@@ -703,7 +718,7 @@ local MetaSchema = Schema.new({
     end
 
     local cache_key = schema.cache_key
-    if cache_key then
+    if type(schema.cache_key) == 'table' then
       local found
       for i = 1, #cache_key do
         found = nil
@@ -725,6 +740,8 @@ local MetaSchema = Schema.new({
         if found and not found.unique then
           errors["cache_key"] = meta_errors.CACHE_KEY_UNIQUE
         end
+      elseif type(schema.cache_key) ~= 'function' then
+        errors["cache_key"] = meta_errors.CACHE_KEY
       end
     end
 
