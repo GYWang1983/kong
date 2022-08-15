@@ -25,7 +25,6 @@ local pairs = pairs
 local tostring = tostring
 local table = table
 local table_concat = table.concat
-local timer_at = ngx.timer.at
 local run_hook = hooks.run_hook
 local var = ngx.var
 
@@ -33,10 +32,65 @@ local var = ngx.var
 local CRIT = ngx.CRIT
 local ERR = ngx.ERR
 local WARN = ngx.WARN
-local DEBUG = ngx.DEBUG
 local EMPTY_T = pl_tablex.readonly {}
 
 
+local set_authority
+local set_upstream_cert_and_key
+if ngx.config.subsystem ~= "stream" then
+  set_authority = require("resty.kong.grpc").set_authority
+  set_upstream_cert_and_key = require("resty.kong.tls").set_upstream_cert_and_key
+end
+
+
+local get_query_arg
+do
+  local sort = table.sort
+  local get_uri_args = ngx.req.get_uri_args
+  local limit = 100
+
+  -- OpenResty allows us to reuse the table that it populates with the request
+  -- query args. The table is cleared by `ngx.req.get_uri_args` on each use, so
+  -- there is no need for the caller (us) to clear or reset it manually.
+  --
+  -- @see https://github.com/openresty/lua-resty-core/pull/288
+  -- @see https://github.com/openresty/lua-resty-core/blob/3c3d0786d6e26282e76f39f4fe5577d316a47a09/lib/resty/core/request.lua#L196-L208
+  local cache = require("table.new")(0, limit)
+
+
+  function get_query_arg(name)
+    local query, err = get_uri_args(limit, cache)
+
+    if err == "truncated" then
+      log(WARN, "could not fetch all query string args for request, ",
+                "hash value may be empty/incomplete")
+
+    elseif not query then
+      log(ERR, "failed fetching query string args: ", err or "unknown error")
+      return
+    end
+
+    local value = query[name]
+
+    -- normalization
+    --
+    -- 1. convert booleans to string
+    -- 2. sort and concat multi-value args
+
+    if type(value) == "table" then
+      for i = 1, #value do
+        value[i] = tostring(value[i])
+      end
+      sort(value)
+      value = table_concat(value, ",")
+
+    elseif value ~= nil then
+      value = tostring(value)
+    end
+
+    return value
+  end
+end
 
 -- Calculates hash-value.
 -- Will only be called once per request, on first try.
@@ -50,6 +104,8 @@ local function get_value_to_hash(upstream, ctx)
 
   local identifier
   local header_field_name = "hash_on_header"
+  local query_arg_field_name = "hash_on_query_arg"
+  local uri_capture_name = "hash_on_uri_capture"
 
   for _ = 1,2 do
 
@@ -90,6 +146,25 @@ local function get_value_to_hash(upstream, ctx)
         }
       end
 
+    elseif hash_on == "path" then
+      -- for the sake of simplicity, we're using the NGINX-normalized version of
+      -- the path here instead of running ngx.var.request_uri through our
+      -- internal normalization mechanism
+      identifier = var.uri
+
+    elseif hash_on == "query_arg" then
+      local arg_name = upstream[query_arg_field_name]
+      identifier = get_query_arg(arg_name)
+
+    elseif hash_on == "uri_capture" then
+      local captures = (ctx.router_matches or EMPTY_T).uri_captures
+      if captures then
+        local group = upstream[uri_capture_name]
+        identifier = captures[group]
+      end
+
+    else
+      log(ERR, "unknown hash_on value: ", hash_on)
     end
 
     if identifier then
@@ -99,6 +174,9 @@ local function get_value_to_hash(upstream, ctx)
     -- we missed the first, so now try the fallback
     hash_on = upstream.hash_fallback
     header_field_name = "hash_fallback_header"
+    query_arg_field_name = "hash_fallback_query_arg"
+    uri_capture_name = "hash_fallback_uri_capture"
+
     if hash_on == "none" then
       return nil
     end
@@ -182,14 +260,7 @@ local function init()
     end
   end
 
-  local _
-  local frequency = kong.configuration.worker_state_update_frequency or 1
-  _, err = timer_at(frequency, upstreams.update_balancer_state)
-  if err then
-    log(CRIT, "unable to start update proxy state timer: ", err)
-  else
-    log(DEBUG, "update proxy state timer scheduled")
-  end
+  upstreams.update_balancer_state()
 end
 
 
@@ -247,7 +318,7 @@ local function execute(balancer_data, ctx)
       -- only add it if it doesn't exist, in case a plugin inserted one
       hash_value = balancer_data.hash_value
       if not hash_value then
-        hash_value = get_value_to_hash(upstream, ctx)
+        hash_value = get_value_to_hash(upstream, ctx) or ""
         balancer_data.hash_value = hash_value
       end
 
@@ -265,7 +336,7 @@ local function execute(balancer_data, ctx)
             return
           end
 
-          res, err = kong.service.set_tls_cert_key(cert.cert, cert.key)
+          res, err = set_upstream_cert_and_key(cert.cert, cert.key)
           if not res then
             log(ERR, "unable to apply upstream client TLS certificate ",
                      client_certificate.id, ": ", err)
@@ -344,7 +415,7 @@ local function post_health(upstream, hostname, ip, port, is_healthy)
   end
 
   local ok, err
-  if ip then
+  if ip and (utils.hostname_type(ip) ~= "name") then
     ok, err = healthchecker:set_target_status(ip, port, hostname, is_healthy)
   else
     ok, err = healthchecker:set_all_target_statuses_for_hostname(hostname, port, is_healthy)
@@ -379,7 +450,7 @@ local function set_host_header(balancer_data, upstream_scheme, upstream_host, is
     -- the nginx grpc module does not offer a way to override the
     -- :authority pseudo-header; use our internal API to do so
     if upstream_scheme == "grpc" or upstream_scheme == "grpcs" then
-      local ok, err = kong.service.request.set_header(":authority", new_upstream_host)
+      local ok, err = set_authority(new_upstream_host)
       if not ok then
         log(ERR, "failed to set :authority header: ", err)
       end

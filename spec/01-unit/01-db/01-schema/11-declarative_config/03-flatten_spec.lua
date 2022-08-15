@@ -107,6 +107,7 @@ describe("declarative config: flatten", function()
           - name: foo
             host: example.com
             protocol: https
+            enabled: false
             _comment: my comment
             _ignore:
             - foo: bar
@@ -139,6 +140,7 @@ describe("declarative config: flatten", function()
               tls_verify_depth = null,
               tls_verify = null,
               ca_certificates = null,
+              enabled = true,
             },
             {
               id = "UUID",
@@ -158,6 +160,7 @@ describe("declarative config: flatten", function()
               tls_verify_depth = null,
               tls_verify = null,
               ca_certificates = null,
+              enabled = false,
             },
           }
         }, idempotent(config))
@@ -232,6 +235,7 @@ describe("declarative config: flatten", function()
               tls_verify_depth = null,
               tls_verify = null,
               ca_certificates = null,
+              enabled = true,
             }
           }
         }, idempotent(config))
@@ -464,6 +468,7 @@ describe("declarative config: flatten", function()
               tls_verify_depth = null,
               tls_verify = null,
               ca_certificates = null,
+              enabled = true,
             }
           }
         }, idempotent(config))
@@ -501,6 +506,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               }
             }
           }, idempotent(config))
@@ -637,6 +643,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               }, {
                 connect_timeout = 60000,
                 created_at = 1234567890,
@@ -655,6 +662,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               } }
           }, idempotent(config))
         end)
@@ -690,6 +698,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               }
             }
           }, idempotent(config))
@@ -752,6 +761,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               } }
           }, idempotent(config))
         end)
@@ -904,6 +914,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               }, {
                 connect_timeout = 60000,
                 created_at = 1234567890,
@@ -922,6 +933,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               } }
           }, idempotent(config))
         end)
@@ -989,6 +1001,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               }
             }
           }, idempotent(config))
@@ -1177,6 +1190,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               }, {
                 connect_timeout = 60000,
                 created_at = 1234567890,
@@ -1195,6 +1209,7 @@ describe("declarative config: flatten", function()
                 tls_verify_depth = null,
                 tls_verify = null,
                 ca_certificates = null,
+                enabled = true,
               } }
           }, idempotent(config))
         end)
@@ -1755,6 +1770,10 @@ describe("declarative config: flatten", function()
                 hash_on_cookie = null,
                 hash_on_cookie_path = "/",
                 hash_on_header = null,
+                hash_on_query_arg = null,
+                hash_fallback_query_arg = null,
+                hash_on_uri_capture = null,
+                hash_fallback_uri_capture = null,
                 healthchecks = {
                   active = {
                     concurrency = 10,
@@ -1766,6 +1785,7 @@ describe("declarative config: flatten", function()
                     http_path = "/",
                     https_sni = null,
                     https_verify_certificate = true,
+                    headers = null,
                     timeout = 1,
                     type = "http",
                     unhealthy = {
@@ -1806,6 +1826,10 @@ describe("declarative config: flatten", function()
                 hash_on_cookie = null,
                 hash_on_cookie_path = "/",
                 hash_on_header = null,
+                hash_on_query_arg = null,
+                hash_fallback_query_arg = null,
+                hash_on_uri_capture = null,
+                hash_fallback_uri_capture = null,
                 healthchecks = {
                   active = {
                     concurrency = 10,
@@ -1817,6 +1841,7 @@ describe("declarative config: flatten", function()
                     http_path = "/",
                     https_sni = null,
                     https_verify_certificate = true,
+                    headers = null,
                     timeout = 1,
                     type = "http",
                     unhealthy = {

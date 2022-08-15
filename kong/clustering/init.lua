@@ -1,68 +1,57 @@
 local _M = {}
+local _MT = { __index = _M, }
 
 
 local pl_file = require("pl.file")
 local pl_tablex = require("pl.tablex")
 local ssl = require("ngx.ssl")
 local openssl_x509 = require("resty.openssl.x509")
-local ngx_null = ngx.null
-local ngx_md5 = ngx.md5
-local tostring = tostring
+local ngx_log = ngx.log
 local assert = assert
-local error = error
-local concat = table.concat
 local sort = table.sort
 local type = type
 
 
-local MT = { __index = _M, }
+local check_protocol_support =
+  require("kong.clustering.utils").check_protocol_support
 
 
-local compare_sorted_strings
+local ngx_ERR = ngx.ERR
+local ngx_DEBUG = ngx.DEBUG
+local ngx_WARN = ngx.WARN
 
 
-local function to_sorted_string(value)
-  if value == ngx_null then
-    return "/null/"
-  end
+local _log_prefix = "[clustering] "
 
-  local t = type(value)
-  if t == "table" then
-    local i = 1
-    local o = { "{" }
-    for k, v in pl_tablex.sort(value, compare_sorted_strings) do
-      o[i+1] = to_sorted_string(k)
-      o[i+2] = ":"
-      o[i+3] = to_sorted_string(v)
-      o[i+4] = ";"
-      i=i+4
-    end
-    if i == 1 then
-      i = i + 1
-    end
-    o[i] = "}"
 
-    return concat(o, nil, 1, i)
-
-  elseif t == "string" then
-    return "$" .. value .. "$"
-
-  elseif t == "number" then
-    return "#" .. tostring(value) .. "#"
-
-  elseif t == "boolean" then
-    return "?" .. tostring(value) .. "?"
-
-  else
-    error("invalid type to be sorted (JSON types are supported")
+-- Sends "clustering", "push_config" to all workers in the same node, including self
+local function post_push_config_event()
+  local res, err = kong.worker_events.post("clustering", "push_config")
+  if not res then
+    ngx_log(ngx_ERR, _log_prefix, "unable to broadcast event: ", err)
   end
 end
 
 
-compare_sorted_strings = function(a, b)
-  a = to_sorted_string(a)
-  b = to_sorted_string(b)
-  return a < b
+-- Handles "clustering:push_config" cluster event
+local function handle_clustering_push_config_event(data)
+  ngx_log(ngx_DEBUG, _log_prefix, "received clustering:push_config event for ", data)
+  post_push_config_event()
+end
+
+
+-- Handles "dao:crud" worker event and broadcasts "clustering:push_config" cluster event
+local function handle_dao_crud_event(data)
+  if type(data) ~= "table" or data.schema == nil or data.schema.db_export == false then
+    return
+  end
+
+  kong.cluster_events:broadcast("clustering:push_config", data.schema.name .. ":" .. data.operation)
+
+  -- we have to re-broadcast event using `post` because the dao
+  -- events were sent using `post_local` which means not all workers
+  -- can receive it
+  post_push_config_event()
 end
 
 
@@ -73,46 +62,118 @@ function _M.new(conf)
     conf = conf,
   }
 
-  setmetatable(self, MT)
+  setmetatable(self, _MT)
 
-  -- note: pl_file.read throws error on failure so
-  -- no need for error checking
-  local cert = pl_file.read(conf.cluster_cert)
+  local cert = assert(pl_file.read(conf.cluster_cert))
   self.cert = assert(ssl.parse_pem_cert(cert))
 
   cert = openssl_x509.new(cert, "PEM")
   self.cert_digest = cert:digest("sha256")
 
-  local key = pl_file.read(conf.cluster_cert_key)
+  local key = assert(pl_file.read(conf.cluster_cert_key))
   self.cert_key = assert(ssl.parse_pem_priv_key(key))
 
-  self.child = require("kong.clustering." .. conf.role).new(self)
+  if conf.role == "control_plane" then
+    self.json_handler =
+      require("kong.clustering.control_plane").new(self.conf, self.cert_digest)
+
+    self.wrpc_handler =
+      require("kong.clustering.wrpc_control_plane").new(self.conf, self.cert_digest)
+  end
 
   return self
 end
 
 
-function _M:calculate_config_hash(config_table)
-  return ngx_md5(to_sorted_string(config_table))
-end
-
-
 function _M:handle_cp_websocket()
-  return self.child:handle_cp_websocket()
+  return self.json_handler:handle_cp_websocket()
 end
 
+function _M:handle_wrpc_websocket()
+  return self.wrpc_handler:handle_cp_websocket()
+end
+
+function _M:init_cp_worker(plugins_list)
+  -- The "clustering:push_config" cluster event gets inserted in the cluster when there's
+  -- a crud change (like an insertion or deletion). Only one worker per kong node receives
+  -- this callback. This makes such node post push_config events to all the cp workers on
+  -- its node
+  kong.cluster_events:subscribe("clustering:push_config", handle_clustering_push_config_event)
+
+  -- The "dao:crud" event is triggered using post_local, which eventually generates an
+  -- ""clustering:push_config" cluster event. It is assumed that the workers in the
+  -- same node where the dao:crud event originated will "know" about the update mostly via
+  -- changes in the cache shared dict. Since data planes don't use the cache, nodes in the same
+  -- kong node where the event originated will need to be notified so they push config to
+  -- their data planes
+  kong.worker_events.register(handle_dao_crud_event, "dao:crud")
+
+  self.json_handler:init_worker(plugins_list)
+  if not kong.configuration.legacy_hybrid_protocol then
+      self.wrpc_handler:init_worker(plugins_list)
+  end
+end
+
+function _M:init_dp_worker(plugins_list)
+  local start_dp = function(premature)
+    if premature then
+      return
+    end
+
+    local config_proto, msg
+    if not kong.configuration.legacy_hybrid_protocol then
+      config_proto, msg = check_protocol_support(self.conf, self.cert, self.cert_key)
+      -- otherwise config_proto = nil
+    end
+
+    if not config_proto and msg then
+      ngx_log(ngx_ERR, _log_prefix, "error check protocol support: ", msg)
+    end
+
+    ngx_log(ngx_DEBUG, _log_prefix, "config_proto: ", config_proto, " / ", msg)
+
+    local data_plane
+    if config_proto == "v0" or config_proto == nil then
+      data_plane = "kong.clustering.data_plane"
+
+    else -- config_proto == "v1" or higher
+      data_plane = "kong.clustering.wrpc_data_plane"
+    end
+
+    self.child = require(data_plane).new(self.conf, self.cert, self.cert_key)
+
+    if self.child then
+      self.child:init_worker(plugins_list)
+    end
+  end
+
+  assert(ngx.timer.at(0, start_dp))
+end
 
 function _M:init_worker()
-  self.plugins_list = assert(kong.db.plugins:get_handlers())
-  sort(self.plugins_list, function(a, b)
+  local plugins_list = assert(kong.db.plugins:get_handlers())
+  sort(plugins_list, function(a, b)
     return a.name:lower() < b.name:lower()
   end)
 
-  self.plugins_list = pl_tablex.map(function(p)
+  plugins_list = pl_tablex.map(function(p)
     return { name = p.name, version = p.handler.VERSION, }
-  end, self.plugins_list)
+  end, plugins_list)
 
-  self.child:init_worker()
+  local role = self.conf.role
+
+  if kong.configuration.legacy_hybrid_protocol then
+    ngx_log(ngx_WARN, _log_prefix, "forcing to use legacy protocol (over WebSocket)")
+  end
+
+  if role == "control_plane" then
+    self:init_cp_worker(plugins_list)
+    return
+  end
+
+  if role == "data_plane" and ngx.worker.id() == 0 then
+    self:init_dp_worker(plugins_list)
+  end
 end
 
 

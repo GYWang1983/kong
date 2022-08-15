@@ -31,6 +31,7 @@ return {
       "snis",
       "upstreams",
       "targets",
+      "vaults",
     },
     nodoc_entities = {
     },
@@ -60,7 +61,7 @@ return {
     { title = [[DB-less mode]],
       text = [[
 
-        In [DB-less mode](../db-less-and-declarative-config), the Admin API can be used to load a new declarative
+        In [DB-less mode](../reference/db-less-and-declarative-config), the Admin API can be used to load a new declarative
         configuration, and for inspecting the current configuration. In DB-less mode,
         the Admin API for each Kong node functions independently, reflecting the memory state
         of that particular Kong node. This is the case because there is no database
@@ -106,7 +107,7 @@ return {
         given file take their place.
 
         To learn more about the file format, see the
-        [declarative configuration](../db-less-and-declarative-config) documentation.
+        [declarative configuration](../reference/db-less-and-declarative-config) documentation.
 
 
         <div class="endpoint post indent">/config</div>
@@ -229,12 +230,12 @@ return {
   },
 
   footer = [[
-    [clustering]: /gateway-oss/{{page.kong_version}}/clustering
-    [cli]: /gateway-oss/{{page.kong_version}}/cli
-    [active]: /gateway-oss/{{page.kong_version}}/health-checks-circuit-breakers/#active-health-checks
-    [healthchecks]: /gateway-oss/{{page.kong_version}}/health-checks-circuit-breakers
-    [secure-admin-api]: /gateway-oss/{{page.kong_version}}/secure-admin-api
-    [proxy-reference]: /gateway-oss/{{page.kong_version}}/proxy
+    [clustering]: /gateway/{{page.kong_version}}/reference/clustering
+    [cli]: /gateway/{{page.kong_version}}/reference/cli
+    [active]: /gateway/{{page.kong_version}}/reference/health-checks-circuit-breakers/#active-health-checks
+    [healthchecks]: /gateway/{{page.kong_version}}/reference/health-checks-circuit-breakers
+    [secure-admin-api]: /gateway/{{page.kong_version}}/admin-api/secure-admin-api
+    [proxy-reference]: /gateway/{{page.kong_version}}/reference/proxy
   ]],
 
   general = {
@@ -264,7 +265,7 @@ return {
                         ...
                     ]
                 },
-                "configuration" : {
+                "configuration": {
                     ...
                 },
                 "tagline": "Welcome to Kong",
@@ -464,7 +465,7 @@ return {
             key relationships or uniqueness check failures against the
             contents of the data store.
           ]],
-          response =[[
+          response = [[
             ```
             HTTP 200 OK
             ```
@@ -474,6 +475,82 @@ return {
                 "message": "schema validation successful"
             }
             ```
+          ]],
+        },
+      },
+      ["/timers"] = {
+        GET = {
+          title = [[Retrieve runtime debugging info of Kong's timers]],
+          endpoint = [[<div class="endpoint post">/timers</div>]],
+          description = [[
+            Retrieve runtime stats data from [lua-resty-timer-ng](https://github.com/Kong/lua-resty-timer-ng).
+          ]],
+          response = [[
+            ```
+            HTTP 200 OK
+            ```
+
+            ```json
+            {   "worker": {
+                  "id": 0,
+                  "count": 4,
+                },
+                "stats": {
+                  "flamegraph": {
+                    "running": "@./kong/init.lua:706:init_worker();@./kong/runloop/handler.lua:1086:before() 0\n",
+                    "elapsed_time": "@./kong/init.lua:706:init_worker();@./kong/runloop/handler.lua:1086:before() 17\n",
+                    "pending": "@./kong/init.lua:706:init_worker();@./kong/runloop/handler.lua:1086:before() 0\n"
+                  },
+                  "sys": {
+                      "running": 0,
+                      "runs": 7,
+                      "pending": 0,
+                      "waiting": 7,
+                      "total": 7
+                  },
+                  "timers": {
+                      "healthcheck-localhost:8080": {
+                          "name": "healthcheck-localhost:8080",
+                          "meta": {
+                              "name": "@/build/luarocks/share/lua/5.1/resty/counter.lua:71:new()",
+                              "callstack": "@./kong/plugins/prometheus/prometheus.lua:673:init_worker();@/build/luarocks/share/lua/5.1/resty/counter.lua:71:new()"
+                          },
+                          "stats": {
+                              "finish": 2,
+                              "runs": 2,
+                              "elapsed_time": {
+                                  "min": 0,
+                                  "max": 0,
+                                  "avg": 0,
+                                  "variance": 0
+                              },
+                              "last_err_msg": ""
+                          }
+                      }
+                  }
+                }
+            }
+            ```
+            * `worker`:
+              * `id`: The ordinal number of the current Nginx worker processes (starting from number 0).
+              * `count`: The total number of the Nginx worker processes.
+            * `stats.flamegraph`: String-encoded timer-related flamegraph data.
+              You can use [brendangregg/FlameGraph](https://github.com/brendangregg/FlameGraph) to generate flamegraph svgs.
+            * `stats.sys`: List the number of different type of timers.
+              * `running`: number of running timers.
+              * `pending`: number of pending timers.
+              * `waiting`: number of unexpired timers.
+              * `total`: running + pending + waiting.
+            * `timers.meta`: Program callstack of created timers.
+              * `name`: An automatically generated string that stores the location where the creation timer was created.
+              * `callstack`: Lua call stack string showing where this timer was created.
+            * `timers.stats.elapsed_time`: An object that stores the maximum, minimum, average and variance
+              of the time spent on each run of the timer (second).
+            * `timers.stats.runs`: Total number of runs.
+            * `timers.stats.finish`: Total number of successful runs.
+
+            Note: `flamegraph`, `timers.meta` and `timers.stats.elapsed_time` keys are only available when Kong's `log_level` config is set to `debug`.
+            Read the [doc of lua-resty-timer-ng](https://github.com/Kong/lua-resty-timer-ng#stats) for more details.
           ]],
         },
       },
@@ -530,7 +607,8 @@ return {
                     "connections_reading": 0,
                     "connections_writing": 1,
                     "connections_waiting": 0
-                }
+                },
+                "configuration_hash": "779742c3d7afee2e38f977044d2ed96b"
             }
             ```
 
@@ -581,6 +659,10 @@ return {
                 * `reachable`: A boolean value reflecting the state of the
                   database connection. Please note that this flag **does not**
                   reflect the health of the database itself.
+            * `configuration_hash`: The hash of the current configuration. This
+              field is only returned when the Kong node is running in DB-less
+              or data-plane mode. The special return value "00000000000000000000000000000000"
+              means Kong does not currently have a valid configuration loaded.
           ]],
         },
       }
@@ -819,6 +901,12 @@ return {
             If set to `null`, then the Nginx default is respected.
           ]],
         },
+        enabled = {
+          description = [[
+            Whether the Service is active. If set to `false`, the proxy behavior
+            will be as if any routes attached to it do not exist (404). Default: `true`.
+          ]],
+        },
         ca_certificates = {
           description = [[
             Array of `CA Certificate` object UUIDs that are used to build the trust store
@@ -875,8 +963,11 @@ return {
         * For `https`, at least one of `methods`, `hosts`, `headers`, `paths` or `snis`;
         * For `tcp`, at least one of `sources` or `destinations`;
         * For `tls`, at least one of `sources`, `destinations` or `snis`;
+        * For `tls_passthrough`, set `snis`;
         * For `grpc`, at least one of `hosts`, `headers` or `paths`;
         * For `grpcs`, at least one of `hosts`, `headers`, `paths` or `snis`.
+
+        A route can't have both `tls` and `tls_passthrough` protocols at same time.
 
         #### Path handling algorithms
 
@@ -892,18 +983,26 @@ return {
         Both versions of the algorithm detect "double slashes" when combining paths, replacing them by single
         slashes.
 
-        In the following table, `s` is the Service and `r` is the Route.
+        The following table shows the possible combinations of path handling version, strip path, and request:
 
-        | `s.path` | `r.path` | `r.strip_path` | `r.path_handling` | request path | proxied path  |
-        |----------|----------|----------------|-------------------|--------------|---------------|
-        | `/s`     | `/fv0`   | `false`        | `v0`              | `/fv0req`    | `/s/fv0req`   |
-        | `/s`     | `/fv1`   | `false`        | `v1`              | `/fv1req`    | `/sfv1req`    |
-        | `/s`     | `/tv0`   | `true`         | `v0`              | `/tv0req`    | `/s/req`      |
-        | `/s`     | `/tv1`   | `true`         | `v1`              | `/tv1req`    | `/sreq`       |
-        | `/s`     | `/fv0/`  | `false`        | `v0`              | `/fv0/req`   | `/s/fv0/req`  |
-        | `/s`     | `/fv1/`  | `false`        | `v1`              | `/fv1/req`   | `/sfv1/req`   |
-        | `/s`     | `/tv0/`  | `true`         | `v0`              | `/tv0/req`   | `/s/req`      |
-        | `/s`     | `/tv1/`  | `true`         | `v1`              | `/tv1/req`   | `/sreq`       |
+        | `service.path` | `route.path` | `request` |`route.strip_path` | `route.path_handling` | request path | upstream path |
+        |----------------|--------------|-----------|-------------------|-----------------------|--------------|---------------|
+        | `/s`           | `/fv0`       | `req`     | `false`           | `v0`                  |  `/fv0/req`  | `/s/fv0/req`  |
+        | `/s`           | `/fv0`       | `blank`   | `false`           | `v0`                  |  `/fv0`      | `/s/fv0`      |
+        | `/s`           | `/fv1`       | `req`     | `false`           | `v1`                  |  `/fv1/req`  | `/sfv1/req`   |
+        | `/s`           | `/fv1`       | `blank`   | `false`           | `v1`                  |  `/fv1`      | `/sfv1`       |
+        | `/s`           | `/tv0`       | `req`     | `true`            | `v0`                  |  `/tv0/req`  | `/s/req`      |
+        | `/s`           | `/tv0`       | `blank`   | `true`            | `v0`                  |  `/tv0`      | `/s`          |
+        | `/s`           | `/tv1`       | `req`     | `true`            | `v1`                  |  `/tv1/req`  | `/s/req`      |
+        | `/s`           | `/tv1`       | `blank`   | `true`            | `v1`                  |  `/tv1`      | `/s`          |
+        | `/s`           | `/fv0/`      | `req`     | `false`           | `v0`                  |  `/fv0/req`  | `/s/fv0/req`  |
+        | `/s`           | `/fv0/`      | `blank`   | `false`           | `v0`                  |  `/fv0/`     | `/s/fv01/`    |
+        | `/s`           | `/fv1/`      | `req`     | `false`           | `v1`                  |  `/fv1/req`  | `/sfv1/req`   |
+        | `/s`           | `/fv1/`      | `blank`   | `false`           | `v1`                  |  `/fv1/`     | `/sfv1/`      |
+        | `/s`           | `/tv0/`      | `req`     | `true`            | `v0`                  |  `/tv0/req`  | `/s/req`      |
+        | `/s`           | `/tv0/`      | `blank`   | `true`            | `v0`                  |  `/tv0/`     | `/s/`         |
+        | `/s`           | `/tv1/`      | `req`     | `true`            | `v1`                  |  `/tv1/req`  | `/sreq`       |
+        | `/s`           | `/tv1/`      | `blank`   | `true`            | `v1`                  |  `/tv1/`     | `/s`          |
 
       ]],
       fields = {
@@ -911,7 +1010,9 @@ return {
         created_at = { skip = true },
         updated_at = { skip = true },
         name = {
-          description = [[The name of the Route. Name values must be unique.]]
+          description = [[The name of the Route. Route names must be unique, and they are
+          case sensitive. For example, there can be two different Routes named "test" and
+          "Test".]]
         },
         regex_priority = {
           description = [[
@@ -964,6 +1065,8 @@ return {
             match if present in the request.
             The `Host` header cannot be used with this attribute: hosts should be specified
             using the `hosts` attribute.
+            When `headers` contains only one value and that value starts with
+            the special prefix `~*`, the value is interpreted as a regular expression.
           ]],
           examples = { { ["x-my-header"] = {"foo", "bar"}, ["x-another-header"] = {"bla"} }, nil },
           skip_in_example = true, -- hack so we get HTTP fields in the first example and Stream fields in the second
@@ -1207,6 +1310,11 @@ return {
       -- While these endpoints actually support DELETE (deleting the entity and
       -- cascade-deleting the plugin), we do not document them, as this operation
       -- is somewhat odd.
+      ["/routes/:routes/service"] = {
+        DELETE = {
+             endpoint = false,
+        }
+      },
       ["/plugins/:plugins/route"] = {
         DELETE = {
           endpoint = false,
@@ -1544,6 +1652,10 @@ return {
         ["hash_fallback_header"] = { kind = "semi-optional", skip_in_example = true, description = [[The header name to take the value from as hash input. Only required when `hash_fallback` is set to `header`.]] },
         ["hash_on_cookie"] = { kind = "semi-optional", skip_in_example = true, description = [[The cookie name to take the value from as hash input. Only required when `hash_on` or `hash_fallback` is set to `cookie`. If the specified cookie is not in the request, Kong will generate a value and set the cookie in the response.]] },
         ["hash_on_cookie_path"] = { kind = "semi-optional", skip_in_example = true, description = [[The cookie path to set in the response headers. Only required when `hash_on` or `hash_fallback` is set to `cookie`.]] },
+        ["hash_on_query_arg"] = { kind = "semi-optional", skip_in_example = true, description = [[The name of the query string argument to take the value from as hash input. Only required when `hash_on` is set to `query_arg`.]] },
+        ["hash_fallback_query_arg"] = { kind = "semi-optional", skip_in_example = true, description = [[The name of the query string argument to take the value from as hash input. Only required when `hash_fallback` is set to `query_arg`.]] },
+        ["hash_on_uri_capture"] = { kind = "semi-optional", skip_in_example = true, description = [[The name of the route URI capture to take the value from as hash input. Only required when `hash_on` is set to `uri_capture`.]] },
+        ["hash_fallback_uri_capture"] = { kind = "semi-optional", skip_in_example = true, description = [[The name of the route URI capture to take the value from as hash input. Only required when `hash_fallback` is set to `uri_capture`.]] },
         ["host_header"] = { description = [[The hostname to be used as `Host` header when proxying requests through Kong.]], example = "example.com", },
         ["client_certificate"] = { description = [[If set, the certificate to be used as client certificate while TLS handshaking to the upstream server.]] },
         ["healthchecks.active.timeout"] = { description = [[Socket timeout for active health checks (in seconds).]] },
@@ -1552,6 +1664,7 @@ return {
         ["healthchecks.active.http_path"] = { description = [[Path to use in GET HTTP request to run as a probe on active health checks.]] },
         ["healthchecks.active.https_verify_certificate"] = { description = [[Whether to check the validity of the SSL certificate of the remote host when performing active health checks using HTTPS.]] },
         ["healthchecks.active.https_sni"] = { description = [[The hostname to use as an SNI (Server Name Identification) when performing active health checks using HTTPS. This is particularly useful when Targets are configured using IPs, so that the target host's certificate can be verified with the proper SNI.]], example = "example.com", },
+        ["healthchecks.active.headers"] = { description = [[One or more lists of values indexed by header name to use in GET HTTP request to run as a probe on active health checks. Values must be pre-formatted.]], example = { { ["x-my-header"] = {"foo", "bar"}, ["x-another-header"] = {"bla"} }, nil }, },
         ["healthchecks.active.healthy.interval"] = { description = [[Interval between active health checks for healthy targets (in seconds). A value of zero indicates that active probes for healthy targets should not be performed.]] },
         ["healthchecks.active.healthy.http_statuses"] = { description = [[An array of HTTP statuses to consider a success, indicating healthiness, when returned by a probe in active health checks.]] },
         ["healthchecks.active.healthy.successes"] = { description = [[Number of successes in active probes (as defined by `healthchecks.active.healthy.http_statuses`) to consider a target healthy.]] },
@@ -1587,8 +1700,7 @@ return {
         service. Every upstream can have many targets, and the targets can be
         dynamically added, modified, or deleted. Changes take effect on the fly.
 
-        Because the upstream maintains a history of target changes, the targets cannot
-        be deleted or modified. To disable a target, post a new one with `weight=0`;
+        To disable a target, post a new one with `weight=0`;
         alternatively, use the `DELETE` convenience method to accomplish the same.
 
         The current target object definition is the one with the latest `created_at`.
@@ -1866,7 +1978,66 @@ return {
           },
         },
       },
-    }
+    },
+
+    vaults = {
+      title = "Vaults Entity",
+      entity_title = "Vault",
+      entity_title_plural = "Vaults",
+      description = [[
+        Vault entities are used to configure different Vault connectors. Examples of
+        Vaults are Environment Variables, Hashicorp Vault and AWS Secrets Manager.
+
+        Configuring a Vault allows referencing the secrets with other entities. For
+        example a certificate entity can store a reference to a certificate and key,
+        stored in a vault, instead of storing the certificate and key within the
+        entity. This allows a proper separation of secrets and configuration and
+        prevents secret sprawl.
+      ]],
+
+      fields = {
+        id = { skip = true },
+        created_at = { skip = true },
+        updated_at = { skip = true },
+        name = {
+          description = [[
+            The name of the Vault that's going to be added. Currently, the Vault implementation
+            must be installed in every Kong instance.
+          ]],
+          example = "env",
+        },
+        prefix = {
+          description = [[
+            The unique prefix (or identifier) for this Vault configuration. The prefix
+            is used to load the right Vault configuration and implementation when referencing
+            secrets with the other entities.
+          ]],
+          example = "env",
+        },
+        description = {
+          description = [[
+            The description of the Vault entity.
+          ]],
+          example = "This vault is used to retrieve redis database access credentials",
+        },
+        config = {
+          description = [[
+            The configuration properties for the Vault which can be found on
+            the vaults' documentation page.
+          ]],
+          example = { prefix = "SSL_" },
+        },
+        tags = {
+          description = [[
+            An optional set of strings associated with the Vault for grouping and filtering.
+          ]],
+          examples = {
+            { "database-credentials", "data-plane" },
+            { "certificates", "critical" },
+          },
+        },
+      },
+    },
   },
 
 --------------------------------------------------------------------------------
@@ -2138,7 +2309,7 @@ return {
       ]],
       response = [[
         ```
-        HTTP 201 Created or HTTP 200 OK
+        HTTP 200 OK
         ```
 
         See POST and PATCH responses.

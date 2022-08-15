@@ -1,17 +1,17 @@
 local kong_global = require "kong.global"
 local cjson = require "cjson.safe"
-local protoc = require "protoc"
+local grpc_tools = require "kong.tools.grpc"
 local pb = require "pb"
-require "lua_pack"
+local lpack = require "lua_pack"
 
 local ngx = ngx
 local kong = kong
-
-
 local cjson_encode = cjson.encode
 local t_unpack = table.unpack       -- luacheck: ignore table
-local st_pack = string.pack         -- luacheck: ignore string
-local st_unpack = string.unpack     -- luacheck: ignore string
+local st_pack = lpack.pack
+local st_unpack = lpack.unpack
+
+local proto_fname = "kong/pluginsocket.proto"
 
 local Rpc = {}
 Rpc.__index = Rpc
@@ -22,6 +22,10 @@ do
   local structpb_value, structpb_list, structpb_struct
 
   function structpb_value(v)
+    if type(v) ~= "table" then
+      return v
+    end
+
     if v.list_value then
       return structpb_list(v.list_value)
     end
@@ -35,14 +39,24 @@ do
 
   function structpb_list(l)
     local out = {}
-    for i, v in ipairs(l.values or l) do
-      out[i] = structpb_value(v)
+    if type(l) == "table" then
+      for i, v in ipairs(l.values or l) do
+        out[i] = structpb_value(v)
+      end
     end
     return out
   end
 
-  function structpb_struct(v)
-    return v.fields or v
+  function structpb_struct(struct)
+    if type(struct) ~= "table" then
+      return struct
+    end
+
+    local out = {}
+    for k, v in pairs(struct.fields or struct) do
+      out[k] = structpb_value(v)
+    end
+    return out
   end
 
   local function unwrap_val(d) return d.v end
@@ -68,6 +82,12 @@ do
     [".kong_plugin_protocol.ExitArgs"] = function (d)
       return d.status, d.body, structpb_struct(d.headers)
     end,
+    [".kong_plugin_protocol.ConsumerSpec"] = function (d)
+      return d.id, d.by_username
+    end,
+    [".kong_plugin_protocol.AuthenticateArgs"] = function (d)
+      return d.consumer, d.credential
+    end,
   }
 end
 
@@ -87,7 +107,7 @@ do
     local struct_v = nil
 
     if t == "table" then
-      if t[1] ~= nil then
+      if v[1] ~= nil then
         list_v = structpb_list(v)
       else
         struct_v = structpb_struct(v)
@@ -95,7 +115,7 @@ do
     end
 
     return {
-      null_value = t == "nil" or nil,
+      null_value = t == "nil" and 1 or nil,
       bool_value = bool_v,
       number_value = t == "number" and v or nil,
       string_value = t == "string" and v or nil,
@@ -131,6 +151,18 @@ do
     [".kong_plugin_protocol.Number"] = wrap_val,
     [".kong_plugin_protocol.Int"] = wrap_val,
     [".kong_plugin_protocol.String"] = wrap_val,
+    [".kong_plugin_protocol.RawBodyResult"] = function(v, err)
+      if type(v) == "string" then
+        return {  content = v }
+      end
+
+      local path = ngx.req.get_body_file()
+      if path then
+        return { body_filepath = path }
+      end
+
+      return { error = err or "Can't read request body" }
+    end,
     --[".kong_plugin_protocol.MemoryStats"] = - function(v)
     --  return {
     --    lua_shared_dicts = {
@@ -159,16 +191,11 @@ local function index_table(table, field)
 end
 
 local function load_service()
-  local p = protoc.new()
-  --p:loadfile("kong/pluginsocket.proto")
+  local p = grpc_tools.new()
+  local protoc_instance = p.protoc_instance
 
-  p:addpath("/usr/include")
-  p:addpath("/usr/local/opt/protobuf/include/")
-
-  p:addpath("/usr/local/kong/lib/")
-  p:addpath("kong")
-
-  local parsed = p:parsefile("pluginsocket.proto")
+  protoc_instance:loadfile(proto_fname)
+  local parsed = protoc_instance:parsefile(proto_fname)
 
   local service = {}
   for i, s in ipairs(parsed.service) do
@@ -189,10 +216,6 @@ local function load_service()
       --print(("service[%q] = %s"):format(lower_name, pp(service[lower_name])))
     end
   end
-
-  p:loadfile("google/protobuf/empty.proto")
-  p:loadfile("google/protobuf/struct.proto")
-  p:loadfile("pluginsocket.proto")
 
   return service
 end
@@ -365,13 +388,14 @@ function Rpc:handle_event(plugin_name, conf, phase)
     instance_id = instance_id,
     event_name = phase,
   }, true)
-  if not res then
-    kong.log.err(err)
-
-    if string.match(err:lower(), "no plugin instance") then
+  if not res or res == "" then
+    if string.match(err:lower(), "no plugin instance")
+      or string.match(err:lower(), "closed")  then
+      kong.log.warn(err)
       self.reset_instance(plugin_name, conf)
       return self:handle_event(plugin_name, conf, phase)
     end
+    kong.log.err(err)
   end
 end
 

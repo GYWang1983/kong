@@ -28,7 +28,6 @@ local log          = ngx.log
 local match        = string.match
 local fmt          = string.format
 local sub          = string.sub
-local kong         = kong
 local utils_toposort = utils.topological_sort
 local insert       = table.insert
 
@@ -51,7 +50,6 @@ local OPERATIONS = {
   write = true,
 }
 local ADMIN_API_PHASE = kong_global.phases.admin_api
-local kong_get_phase = kong_global.get_phase
 local CORE_ENTITIES = constants.CORE_ENTITIES
 
 
@@ -194,8 +192,8 @@ end
 local setkeepalive
 
 
-local function connect(config)
-  local phase  = get_phase(kong)
+local function reconnect(config)
+  local phase = get_phase()
   if phase == "init" or phase == "init_worker" or ngx.IS_CLI then
     -- Force LuaSocket usage in the CLI in order to allow for self-signed
     -- certificates to be trusted (via opts.cafile) in the resty-cli
@@ -241,6 +239,11 @@ local function connect(config)
   end
 
   return connection
+end
+
+
+local function connect(config)
+  return kong.vault.try(reconnect, config)
 end
 
 
@@ -488,11 +491,11 @@ function _mt:query(sql, operation)
     error("operation must be 'read' or 'write', was: " .. tostring(operation), 2)
   end
 
-  local phase  = get_phase(kong)
+  local phase = get_phase()
 
   if not operation or
      not self.config_ro or
-     (phase == "content" and kong_get_phase(kong) == ADMIN_API_PHASE)
+     (phase == "content" and ngx.ctx.KONG_PHASE == ADMIN_API_PHASE)
   then
     -- admin API requests skips the replica optimization
     -- to ensure all its results are always strongly consistent
@@ -921,6 +924,18 @@ function _M.new(kong_config)
     sem_timeout = (kong_config.pg_semaphore_timeout or 60000) / 1000,
   }
 
+  local refs = kong_config["$refs"]
+  if refs then
+    local user_ref = refs.pg_user
+    local password_ref = refs.pg_password
+    if user_ref or password_ref then
+      config["$refs"] = {
+        user = user_ref,
+        password = password_ref,
+      }
+    end
+  end
+
   local db = pgmoon.new(config)
 
   local sem
@@ -958,6 +973,17 @@ function _M.new(kong_config)
       sem_timeout = kong_config.pg_ro_semaphore_timeout and
                     (kong_config.pg_ro_semaphore_timeout / 1000) or nil,
     }
+
+    if refs then
+      local ro_user_ref = refs.pg_ro_user
+      local ro_password_ref = refs.pg_ro_password
+      if ro_user_ref or ro_password_ref then
+        ro_override["$refs"] = {
+          user = ro_user_ref,
+          password = ro_password_ref,
+        }
+      end
+    end
 
     local config_ro = utils.table_merge(config, ro_override)
 

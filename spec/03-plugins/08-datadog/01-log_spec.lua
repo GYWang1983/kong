@@ -55,9 +55,14 @@ for _, strategy in helpers.each_strategy() do
         paths = { "/hello.HelloService/" },
         service = assert(bp.services:insert {
           name = "grpc",
-          url = "grpc://localhost:15002",
+          url = helpers.grpcbin_url,
         }),
       })
+
+      local route6 = bp.routes:insert {
+        hosts   = { "datadog6.com" },
+        service = bp.services:insert { name = "dd6" }
+      }
 
       bp.plugins:insert {
         name     = "key-auth",
@@ -108,6 +113,12 @@ for _, strategy in helpers.each_strategy() do
               sample_rate = 1,
               tags        = {"T2:V2:V3", "T4"},
             },
+            {
+              name        = "request_size",
+              stat_type   = "distribution",
+              sample_rate = 1,
+              tags        = {},
+            },
           },
         },
       }
@@ -154,6 +165,23 @@ for _, strategy in helpers.each_strategy() do
         config   = {
           host   = "127.0.0.1",
           port   = 9999,
+        },
+      }
+
+      bp.plugins:insert {
+        name     = "key-auth",
+        route = { id = route6.id },
+      }
+
+      bp.plugins:insert {
+        name     = "datadog",
+        route = { id = route6.id },
+        config   = {
+          host             = "127.0.0.1",
+          port             = 9999,
+          service_name_tag = "upstream",
+          status_tag       = "http_status",
+          consumer_tag     = "user",
         },
       }
 
@@ -244,6 +272,29 @@ for _, strategy in helpers.each_strategy() do
       assert.contains("prefix.kong_latency:%d*|ms|#name:dd4,status:200,consumer:bar,app:kong", gauges, true)
     end)
 
+    it("logs metrics over UDP with custom tag names", function()
+      local thread = helpers.udp_server(9999, 6)
+
+      local res = assert(proxy_client:send {
+        method  = "GET",
+        path    = "/status/200?apikey=kong",
+        headers = {
+          ["Host"] = "datadog6.com"
+        }
+      })
+      assert.res_status(200, res)
+
+      local ok, gauges = thread:join()
+      assert.True(ok)
+      assert.equal(6, #gauges)
+      assert.contains("kong.request.count:1|c|#upstream:dd6,http_status:200,user:bar,app:kong",gauges)
+      assert.contains("kong.latency:%d+|ms|#upstream:dd6,http_status:200,user:bar,app:kong", gauges, true)
+      assert.contains("kong.request.size:%d+|ms|#upstream:dd6,http_status:200,user:bar,app:kong", gauges, true)
+      assert.contains("kong.response.size:%d+|ms|#upstream:dd6,http_status:200,user:bar,app:kong", gauges, true)
+      assert.contains("kong.upstream_latency:%d+|ms|#upstream:dd6,http_status:200,user:bar,app:kong", gauges, true)
+      assert.contains("kong.kong_latency:%d*|ms|#upstream:dd6,http_status:200,user:bar,app:kong", gauges, true)
+    end)
+
     it("logs only given metrics", function()
       local thread = helpers.udp_server(9999, 1)
 
@@ -264,7 +315,7 @@ for _, strategy in helpers.each_strategy() do
     end)
 
     it("logs metrics with tags", function()
-      local thread = helpers.udp_server(9999, 2)
+      local thread = helpers.udp_server(9999, 3)
 
       local res = assert(proxy_client:send {
         method  = "GET",
@@ -279,6 +330,7 @@ for _, strategy in helpers.each_strategy() do
       assert.True(ok)
       assert.contains("kong.request.count:1|c|#name:dd3,status:200,T2:V2,T3:V3,T4", gauges)
       assert.contains("kong.latency:%d+|g|#name:dd3,status:200,T2:V2:V3,T4", gauges, true)
+      assert.contains("kong.request.size:%d+|d|#name:dd3,status:200", gauges, true)
     end)
 
     it("logs metrics to host/port defined via environment variables", function()

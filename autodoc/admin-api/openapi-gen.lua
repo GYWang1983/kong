@@ -1,3 +1,5 @@
+setmetatable(_G, nil) -- silence OpenResty's global var warnings
+
 local admin_api_data = require "autodoc.admin-api.data.admin-api"
 local kong_meta = require "kong.meta"
 local lfs = require "lfs"
@@ -33,12 +35,14 @@ _KONG = require("kong.meta")          -- luacheck: ignore
 kong = require("kong.global").new()   -- luacheck: ignore
 kong.configuration = {                -- luacheck: ignore
   loaded_plugins = {},
+  loaded_vaults = {},
 }
 kong.db = require("kong.db").new({    -- luacheck: ignore
   database = "postgres",
 })
 kong.configuration = { -- luacheck: ignore
-  loaded_plugins = {}
+  loaded_plugins = {},
+  loaded_vaults = {},
 }
 
 

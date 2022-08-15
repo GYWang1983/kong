@@ -8,8 +8,10 @@ dep_version() {
 OPENRESTY=$(dep_version RESTY_VERSION)
 LUAROCKS=$(dep_version RESTY_LUAROCKS_VERSION)
 OPENSSL=$(dep_version RESTY_OPENSSL_VERSION)
-GO_PLUGINSERVER=$(dep_version KONG_GO_PLUGINSERVER_VERSION)
 PCRE=$(dep_version RESTY_PCRE_VERSION)
+RESTY_LMDB=$(dep_version RESTY_LMDB_VERSION)
+RESTY_EVENTS=$(dep_version RESTY_EVENTS_VERSION)
+ATC_ROUTER_VERSION=$(dep_version ATC_ROUTER_VERSION)
 
 
 #---------
@@ -18,7 +20,6 @@ PCRE=$(dep_version RESTY_PCRE_VERSION)
 
 DOWNLOAD_ROOT=${DOWNLOAD_ROOT:=/download-root}
 BUILD_TOOLS_DOWNLOAD=$GITHUB_WORKSPACE/kong-build-tools
-GO_PLUGINSERVER_DOWNLOAD=$GITHUB_WORKSPACE/go-pluginserver
 
 KONG_NGINX_MODULE_BRANCH=${KONG_NGINX_MODULE_BRANCH:=master}
 
@@ -27,14 +28,6 @@ KONG_NGINX_MODULE_BRANCH=${KONG_NGINX_MODULE_BRANCH:=master}
 #--------
 INSTALL_ROOT=${INSTALL_ROOT:=/install-cache}
 
-pushd $GO_PLUGINSERVER_DOWNLOAD
-  go get ./...
-  make
-
-  mkdir -p $INSTALL_ROOT/go-pluginserver
-  cp go-pluginserver $INSTALL_ROOT/go-pluginserver/
-popd
-
 kong-ngx-build \
     --work $DOWNLOAD_ROOT \
     --prefix $INSTALL_ROOT \
@@ -42,7 +35,10 @@ kong-ngx-build \
     --kong-nginx-module $KONG_NGINX_MODULE_BRANCH \
     --luarocks $LUAROCKS \
     --openssl $OPENSSL \
+    --resty-lmdb $RESTY_LMDB \
+    --resty-events $RESTY_EVENTS \
     --pcre $PCRE \
+    --atc-router $ATC_ROUTER_VERSION \
     --debug
 
 OPENSSL_INSTALL=$INSTALL_ROOT/openssl

@@ -1,6 +1,6 @@
 local version = setmetatable({
-  major = 2,
-  minor = 6,
+  major = 3,
+  minor = 0,
   patch = 0,
   --suffix = "rc.1"
 }, {
@@ -17,9 +17,13 @@ return {
   _VERSION = tostring(version),
   _VERSION_TABLE = version,
   _SERVER_TOKENS = "kong/" .. tostring(version),
+
+  -- unified version string for CE and EE
+  version = tostring(version),
+
   -- third-party dependencies' required version, as they would be specified
   -- to lua-version's `set()` in the form {from, to}
   _DEPENDENCIES = {
-    nginx = { "1.19.3.1", "1.19.9.1" },
+    nginx = { "1.21.4.1" },
   }
 }

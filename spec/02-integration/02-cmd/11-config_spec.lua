@@ -44,10 +44,11 @@ describe("kong config", function()
     assert(db.routes:truncate())
     assert(db.services:truncate())
 
-    local dns_hostsfile = assert(os.tmpname())
+    local dns_hostsfile = assert(os.tmpname() .. ".hosts")
     local fd = assert(io.open(dns_hostsfile, "w"))
     assert(fd:write("127.0.0.1 " .. constants.REPORTS.ADDRESS))
     assert(fd:close())
+
 
     local filename = helpers.make_yaml_file([[
       _format_version: "1.1"
@@ -99,7 +100,7 @@ describe("kong config", function()
       anonymous_reports = "on",
     }))
 
-    local thread = helpers.tcp_server(constants.REPORTS.STATS_PORT)
+    local thread = helpers.tcp_server(constants.REPORTS.STATS_TLS_PORT, {tls=true})
 
     assert(helpers.kong_exec("config db_import " .. filename, {
       prefix = helpers.test_conf.prefix,
@@ -107,7 +108,8 @@ describe("kong config", function()
 
     local _, res = assert(thread:join())
     assert.matches("signal=config-db-import", res, nil, true)
-    assert.matches("decl_fmt_version=1.1", res, nil, true)
+    -- it will be updated on-the-fly
+    assert.matches("decl_fmt_version=3.0", res, nil, true)
     assert.matches("file_ext=.yml", res, nil, true)
 
     local client = helpers.admin_client()
@@ -151,7 +153,13 @@ describe("kong config", function()
     assert(helpers.stop_kong())
   end)
 
-  it("#db config db_import does not require Kong to be running", function()
+  pending("#db config db_import does not require Kong to be running", function()
+  -- this actually sends data to the telemetry endpoint. TODO: how to avoid that?
+  -- in this case we do not change the DNS hostsfile..
+  -- NetidState Recv-Q Send-Q  Local Address:Port   Peer Address:Port
+  -- tcp  ESTAB 0      216        172.23.0.4:35578 35.169.37.138:61830
+  --                                                this is the amazon splunk ip
+  -- tcp  ESTAB 0      0          172.23.0.4:40746    172.23.0.3:5432
     local filename = helpers.make_yaml_file([[
       _format_version: "1.1"
       services:
@@ -190,7 +198,9 @@ describe("kong config", function()
     }))
   end)
 
-  it("#db config db_import deals with repeated targets", function()
+  -- same as with "config db_import does not require Kong to be running"
+  -- when no kong is present, we can't mock a response
+  pending("#db config db_import deals with repeated targets", function()
     -- Since Kong 2.2.0 there's no more target history, but we must make sure
     -- that old configs still can be imported.
     local filename = helpers.make_yaml_file([[
@@ -556,7 +566,7 @@ describe("kong config", function()
 
     convert_yaml_nulls(yaml)
 
-    assert.equals("2.1", yaml._format_version)
+    assert.equals("3.0", yaml._format_version)
     assert.equals(false, yaml._transform)
 
     assert.equals(2, #yaml.services)

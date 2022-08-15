@@ -1,5 +1,3 @@
-local singletons = require "kong.singletons"
-local conf_loader = require "kong.conf_loader"
 local cjson = require "cjson"
 local api_helpers = require "kong.api.api_helpers"
 local Schema = require "kong.db.schema"
@@ -91,6 +89,14 @@ return {
         ngx.log(ngx.ERR, "could not get node id: ", err)
       end
 
+      local available_plugins = {}
+      for name in pairs(kong.configuration.loaded_plugins) do
+        available_plugins[name] = {
+          version = kong.db.plugins.handlers[name].VERSION,
+          priority = kong.db.plugins.handlers[name].PRIORITY,
+        }
+      end
+
       return kong.response.exit(200, {
         tagline = tagline,
         version = version,
@@ -98,14 +104,14 @@ return {
         node_id = node_id,
         timers = {
           running = ngx.timer.running_count(),
-          pending = ngx.timer.pending_count()
+          pending = ngx.timer.pending_count(),
         },
         plugins = {
-          available_on_server = singletons.configuration.loaded_plugins,
-          enabled_in_cluster = distinct_plugins
+          available_on_server = available_plugins,
+          enabled_in_cluster = distinct_plugins,
         },
         lua_version = lua_version,
-        configuration = conf_loader.remove_sensitive(singletons.configuration),
+        configuration = kong.configuration.remove_sensitive(),
         pids = pids,
       })
     end
@@ -179,4 +185,19 @@ return {
       return kong.response.exit(200, copy)
     end
   },
+  ["/timers"] = {
+    GET = function (self, db, helpers)
+      local body = {
+        worker = {
+          id = ngx.worker.id(),
+          count = ngx.worker.count(),
+        },
+        stats = kong.timer:stats({
+          verbose = true,
+          flamegraph = true,
+        })
+      }
+      return kong.response.exit(200, body)
+    end
+  }
 }

@@ -13,9 +13,62 @@ describe("kong start/stop #" .. strategy, function()
   end)
   after_each(function()
     helpers.kill_all()
+    os.execute("rm -rf " .. helpers.test_conf.prefix .. "/worker_events.sock")
   end)
+
   lazy_teardown(function()
     helpers.clean_prefix()
+  end)
+
+  it("fails with referenced values that are not initialized", function()
+    local ok, stderr, stdout = helpers.kong_exec("start", {
+      prefix = helpers.test_conf.prefix,
+      database = strategy,
+      nginx_proxy_real_ip_header = "{vault://env/ipheader}",
+      pg_database = helpers.test_conf.pg_database,
+      cassandra_keyspace = helpers.test_conf.cassandra_keyspace,
+      vaults = "env",
+    })
+
+    assert.matches("Error: failed to dereference '{vault://env/ipheader}': unable to load value (ipheader) from vault (env): not found [{vault://env/ipheader}] for config option 'nginx_proxy_real_ip_header'", stderr, nil, true)
+    assert.is_nil(stdout)
+    assert.is_false(ok)
+
+    helpers.clean_logfile()
+  end)
+
+  it("fails to read referenced secrets when vault does not exist", function()
+    local ok, stderr, stdout = helpers.kong_exec("start", {
+      prefix = helpers.test_conf.prefix,
+      database = helpers.test_conf.database,
+      pg_password = "{vault://non-existent/pg_password}",
+      pg_database = helpers.test_conf.pg_database,
+      cassandra_keyspace = helpers.test_conf.cassandra_keyspace,
+    })
+    assert.matches("failed to dereference '{vault://non-existent/pg_password}': vault not found (non-existent)", stderr, nil, true)
+    assert.is_nil(stdout)
+    assert.is_false(ok)
+
+    helpers.clean_logfile()
+  end)
+
+  it("resolves referenced secrets", function()
+    helpers.setenv("PG_PASSWORD", "dummy")
+    local _, stderr, stdout = assert(helpers.kong_exec("start", {
+      prefix = helpers.test_conf.prefix,
+      database = helpers.test_conf.database,
+      pg_password = "{vault://env/pg_password}",
+      pg_database = helpers.test_conf.pg_database,
+      cassandra_keyspace = helpers.test_conf.cassandra_keyspace,
+      vaults = "env",
+    }))
+    assert.not_matches("failed to dereference {vault://env/pg_password}", stderr, nil, true)
+    assert.matches("Kong started", stdout, nil, true)
+    assert(helpers.kong_exec("stop", {
+      prefix = helpers.test_conf.prefix,
+    }))
+
+    helpers.clean_logfile()
   end)
 
   it("start help", function()
@@ -85,6 +138,7 @@ describe("kong start/stop #" .. strategy, function()
         stream_listen = "127.0.0.1:9022",
         status_listen = "0.0.0.0:8100",
       }))
+      ngx.sleep(0.1)   -- wait unix domain socket
       assert(helpers.kong_exec("stop", {
         prefix = helpers.test_conf.prefix
       }))
@@ -126,6 +180,10 @@ describe("kong start/stop #" .. strategy, function()
   end)
 
   describe("verbose args", function()
+    after_each(function ()
+      os.execute("rm -rf " .. helpers.test_conf.prefix .. "/worker_events.sock")
+    end)
+
     it("accepts verbose --v", function()
       local _, _, stdout = assert(helpers.kong_exec("start --v --conf " .. helpers.test_conf_path))
       assert.matches("[verbose] prefix in use: ", stdout, nil, true)
@@ -174,18 +232,23 @@ describe("kong start/stop #" .. strategy, function()
   end)
 
   describe("/etc/hosts resolving in CLI", function()
-    it("resolves #cassandra hostname", function()
-      assert(helpers.kong_exec("start --vv --run-migrations --conf " .. helpers.test_conf_path, {
-        cassandra_contact_points = "localhost",
-        database = "cassandra"
-      }))
-    end)
-    it("resolves #postgres hostname", function()
-      assert(helpers.kong_exec("start --conf " .. helpers.test_conf_path, {
-        pg_host = "localhost",
-        database = "postgres"
-      }))
-    end)
+    if strategy == "cassandra" then
+      it("resolves #cassandra hostname", function()
+        assert(helpers.kong_exec("start --vv --run-migrations --conf " .. helpers.test_conf_path, {
+          cassandra_contact_points = "localhost",
+          database = "cassandra"
+        }))
+      end)
+
+    elseif strategy == "postgres" then
+      it("resolves #postgres hostname", function()
+        assert(helpers.kong_exec("start --conf " .. helpers.test_conf_path, {
+          pg_host = "localhost",
+          database = "postgres"
+        }))
+      end)
+    end
+
   end)
 
   -- TODO: update with new error messages and behavior
@@ -302,7 +365,7 @@ describe("kong start/stop #" .. strategy, function()
         path = "/hello",
       })
       assert.res_status(404, res) -- no Route configured
-      assert(helpers.stop_kong(helpers.test_conf.prefix))
+      assert(helpers.kong_exec("quit --prefix " .. helpers.test_conf.prefix))
 
       -- TEST: since nginx started in the foreground, the 'kong start' command
       -- stdout should receive all of nginx's stdout as well.
@@ -532,7 +595,7 @@ describe("kong start/stop #" .. strategy, function()
         })
 
         assert.falsy(ok)
-        assert.matches("in 'protocol': expected one of: grpc, grpcs, http, https, tcp, tls, udp", err, nil, true)
+        assert.matches("in 'protocol': expected one of: grpc, grpcs, http, https, tcp, tls, tls_passthrough, udp", err, nil, true)
         assert.matches("in 'name': invalid value '@gobo': the only accepted ascii characters are alphanumerics or ., -, _, and ~", err, nil, true)
         assert.matches("in entry 2 of 'hosts': invalid hostname: \\\\99", err, nil, true)
       end)
@@ -541,125 +604,18 @@ describe("kong start/stop #" .. strategy, function()
   end)
 
   describe("deprecated properties", function()
-    describe("prints a warning to stderr", function()
-      local u = helpers.unindent
+    after_each(function()
+      assert(helpers.stop_kong(helpers.test_conf.prefix))
+    end)
 
-      local function check_warn(opts, deprecated, replacement)
-        local kopts = {
-          prefix = helpers.test_conf.prefix,
-          database = helpers.test_conf.database,
-          pg_database = helpers.test_conf.pg_database,
-          cassandra_keyspace = helpers.test_conf.cassandra_keyspace,
-        }
-
-        for k, v in pairs(opts) do
-          kopts[k] = v
-        end
-
-        local _, stderr, stdout = assert(helpers.kong_exec("start", kopts))
-        assert.matches("Kong started", stdout, nil, true)
-
-        if replacement then
-          assert.matches(u([[
-            [warn] the ']] .. deprecated .. [[' configuration property is
-            deprecated, use ']] .. replacement .. [[' instead
-          ]], nil, true), stderr, nil, true)
-
-        else
-          assert.matches(u([[
-            [warn] the ']] .. deprecated .. [[' configuration property is
-            deprecated
-          ]], nil, true), stderr, nil, true)
-        end
-
-        local _, stderr, stdout = assert(helpers.kong_exec("stop", kopts))
-        assert.matches("Kong stopped", stdout, nil, true)
-        assert.equal("", stderr)
-      end
-
-      it("nginx_optimizations", function()
-        check_warn({
-          nginx_optimizations = true,
-        }, "nginx_optimizations")
-      end)
-
-      it("client_max_body_size", function()
-        check_warn({
-          client_max_body_size = "16k",
-        }, "client_max_body_size", "nginx_http_client_max_body_size")
-      end)
-
-      it("client_body_buffer_size", function()
-        check_warn({
-          client_body_buffer_size = "16k",
-        }, "client_body_buffer_size", "nginx_http_client_body_buffer_size")
-      end)
-
-      it("upstream_keepalive", function()
-        check_warn({
-          upstream_keepalive = 10,
-        }, "upstream_keepalive", "upstream_keepalive_pool_size")
-      end)
-
-      it("nginx_http_upstream_keepalive", function()
-        check_warn({
-          nginx_http_upstream_keepalive = 10,
-        }, "nginx_http_upstream_keepalive", "upstream_keepalive_pool_size")
-      end)
-
-      it("nginx_http_upstream_keepalive_requests", function()
-        check_warn({
-          nginx_http_upstream_keepalive_requests = 50,
-        }, "nginx_http_upstream_keepalive_requests", "upstream_keepalive_max_requests")
-      end)
-
-      it("nginx_http_upstream_keepalive_timeout", function()
-        check_warn({
-          nginx_http_upstream_keepalive_timeout = "30s",
-        }, "nginx_http_upstream_keepalive_timeout", "upstream_keepalive_idle_timeout")
-      end)
-
-      it("nginx_upstream_keepalive", function()
-        check_warn({
-          nginx_upstream_keepalive = 10,
-        }, "nginx_upstream_keepalive", "upstream_keepalive_pool_size")
-      end)
-
-      it("nginx_upstream_keepalive_requests", function()
-        check_warn({
-          nginx_upstream_keepalive_requests = 10,
-        }, "nginx_upstream_keepalive_requests", "upstream_keepalive_max_requests")
-      end)
-
-      it("nginx_upstream_keepalive_timeout", function()
-        check_warn({
-          nginx_upstream_keepalive_timeout = "30s",
-        }, "nginx_upstream_keepalive_timeout", "upstream_keepalive_idle_timeout")
-      end)
-
-      it("'cassandra_consistency'", function()
-        local opts = {
-          prefix = helpers.test_conf.prefix,
-          database = helpers.test_conf.database,
-          pg_database = helpers.test_conf.pg_database,
-          cassandra_keyspace = helpers.test_conf.cassandra_keyspace,
-          cassandra_consistency = "LOCAL_ONE",
-        }
-
-        local _, stderr, stdout = assert(helpers.kong_exec("start", opts))
-        assert.matches("Kong started", stdout, nil, true)
-        assert.matches(u([[
-          [warn] the 'cassandra_consistency' configuration property is
-          deprecated, use 'cassandra_write_consistency / cassandra_read_consistency'
-          instead
-        ]], nil, true), stderr, nil, true)
-
-        local _, stderr, stdout = assert(helpers.kong_exec("stop", opts))
-        assert.matches("Kong stopped", stdout, nil, true)
-        assert.equal("", stderr)
-      end)
+    it("deprecate <worker_consistency>", function()
+      local _, stderr, _ = assert(helpers.kong_exec("start", {
+        prefix = helpers.test_conf.prefix,
+        worker_consistency = "strict",
+      }))
+      assert.matches("the configuration value 'strict' for configuration property 'worker_consistency' is deprecated", stderr, nil, true)
+      assert.matches("the 'worker_consistency' configuration property is deprecated", stderr, nil, true)
     end)
   end)
 end)
-
 end

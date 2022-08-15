@@ -149,7 +149,7 @@ local function new_balancer(opts)
       },
     },
   }
-  local my_upstream = { id=upname, name=upname, ws_id=ws_id, slots=10, healthchecks=hc_defaults, algorithm="round-robin" }
+  local my_upstream = { id=upname, name=upname, ws_id=ws_id, slots=opts.wheelSize or 10, healthchecks=hc_defaults, algorithm="round-robin" }
   local b = (balancers.create_balancer(my_upstream, true))
 
   for k, v in pairs{
@@ -251,9 +251,12 @@ describe("[round robin balancer]", function()
     healthcheckers.init()
     balancers.init()
 
-    local singletons = require "kong.singletons"
-    singletons.worker_events = require "resty.worker.events"
-    singletons.worker_events.configure({
+    local kong = {}
+
+    _G.kong = kong
+
+    kong.worker_events = require "resty.worker.events"
+    kong.worker_events.configure({
       shm = "kong_process_events", -- defined by "lua_shared_dict"
       timeout = 5,            -- life time of event data in shm
       interval = 1,           -- poll interval (seconds)
@@ -266,7 +269,7 @@ describe("[round robin balancer]", function()
       return function() end
     end
 
-    singletons.db = {
+    kong.db = {
       targets = {
         each = empty_each,
         select_by_upstream_raw = function()
@@ -279,7 +282,7 @@ describe("[round robin balancer]", function()
       },
     }
 
-    singletons.core_cache = {
+    kong.core_cache = {
       _cache = {},
       get = function(self, key, _, loader, arg)
         local v = self._cache[key]
@@ -391,7 +394,7 @@ describe("[round robin balancer]", function()
           dns = client,
           wheelSize = 15,
         })
-        assert(add_target(b, "really.really.really.does.not.exist.thijsschreijer.nl", 80, 10))
+        assert(add_target(b, "really.really.really.does.not.exist.hostname.test", 80, 10))
         check_balancer(b)
         assert.equals(0, b.totalWeight) -- has one failed host, so weight must be 0
         dnsA({
@@ -519,35 +522,7 @@ describe("[round robin balancer]", function()
         assert.matches("Balancer is unhealthy", port)
 
       end)
-      it("SRV target with A record targets can be changed with an address", function()
-        local b = check_balancer(new_balancer { dns = client })
-        dnsA({
-          { name = "mashape1.test", address = "12.34.56.1" },
-        })
-        dnsA({
-          { name = "mashape2.test", address = "12.34.56.2" },
-        })
-        dnsSRV({
-          { name = "mashape.test", target = "mashape1.test", port = 8001, weight = 5 },
-          { name = "mashape.test", target = "mashape2.test", port = 8002, weight = 5 },
-        })
-        add_target(b, "mashape.test", 80, 10)
 
-        local _, _, _, handle = b:getPeer()
-        local ok, err = b:setAddressStatus(handle.address, false)
-        assert.is_true(ok)
-        assert.is_nil(err)
-
-        _, _, _, handle = b:getPeer()
-        ok, err = b:setAddressStatus(handle.address, false)
-        assert.is_true(ok)
-        assert.is_nil(err)
-
-        local ip, port = b:getPeer()
-        assert.is_nil(ip)
-        assert.matches("Balancer is unhealthy", port)
-
-      end)
       it("SRV target with port=0 returns the default port", function()
         local b = check_balancer(new_balancer { dns = client })
         dnsA({
@@ -695,14 +670,14 @@ describe("[round robin balancer]", function()
         end
       })
       add_target(b, "12.34.56.78", 123, 100)
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(1, count_add)
       assert.equal(0, count_remove)
 
       --b:removeHost("12.34.56.78", 123)
       b.targets[1].addresses[1].disabled = true
       b:deleteDisabledAddresses(b.targets[1])
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(1, count_add)
       assert.equal(1, count_remove)
     end)
@@ -737,14 +712,14 @@ describe("[round robin balancer]", function()
         { name = "mashape.test", address = "12.34.56.78" },
       })
       add_target(b, "mashape.test", 123, 100)
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(2, count_add)
       assert.equal(0, count_remove)
 
       b.targets[1].addresses[1].disabled = true
       b.targets[1].addresses[2].disabled = true
       b:deleteDisabledAddresses(b.targets[1])
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(2, count_add)
       assert.equal(2, count_remove)
     end)
@@ -785,7 +760,7 @@ describe("[round robin balancer]", function()
         { name = "mashape.test", target = "mashape2.test", port = 8002, weight = 5 },
       })
       add_target(b, "mashape.test", 123, 100)
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(2, count_add)
       assert.equal(0, count_remove)
 
@@ -793,7 +768,7 @@ describe("[round robin balancer]", function()
       b.targets[1].addresses[1].disabled = true
       b.targets[1].addresses[2].disabled = true
       b:deleteDisabledAddresses(b.targets[1])
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(2, count_add)
       assert.equal(2, count_remove)
     end)
@@ -814,7 +789,7 @@ describe("[round robin balancer]", function()
           -- this callback is called when updating. So yield here and
           -- verify that the second thread does not interfere with
           -- the first update, yielded here.
-          ngx.sleep(0.1)
+          ngx.sleep(0)
         end
       })
       dnsA({
@@ -835,7 +810,7 @@ describe("[round robin balancer]", function()
       end)
       ngx.thread.wait(t1)
       ngx.thread.wait(t2)
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.same({
         [1] = 'thread1 start',
         [2] = 'thread1 end',
@@ -1045,7 +1020,7 @@ describe("[round robin balancer]", function()
     end)
     it("weight change for unresolved record, updates properly", function()
       local record = dnsA({
-        { name = "really.really.really.does.not.exist.thijsschreijer.nl", address = "1.2.3.4" },
+        { name = "really.really.really.does.not.exist.hostname.test", address = "1.2.3.4" },
       })
       dnsAAAA({
         { name = "getkong.test", address = "::1" },
@@ -1055,7 +1030,7 @@ describe("[round robin balancer]", function()
         wheelSize = 60,
         requery = 0.1,
       })
-      add_target(b, "really.really.really.does.not.exist.thijsschreijer.nl", 80, 10)
+      add_target(b, "really.really.really.does.not.exist.hostname.test", 80, 10)
       add_target(b, "getkong.test", 80, 10)
       local count = count_indices(b)
       assert.same({
@@ -1067,7 +1042,7 @@ describe("[round robin balancer]", function()
       record.expire = 0
       record.expired = true
       -- do a lookup to trigger the async lookup
-      client.resolve("really.really.really.does.not.exist.thijsschreijer.nl", {qtype = client.TYPE_A})
+      client.resolve("really.really.really.does.not.exist.hostname.test", {qtype = client.TYPE_A})
       sleep(0.5) -- provide time for async lookup to complete
 
       for _ = 1, b.wheelSize do b:getPeer() end -- hit them all to force renewal
@@ -1079,10 +1054,10 @@ describe("[round robin balancer]", function()
       }, count)
 
       -- update the failed record
-      add_target(b, "really.really.really.does.not.exist.thijsschreijer.nl", 80, 20)
+      add_target(b, "really.really.really.does.not.exist.hostname.test", 80, 20)
       -- reinsert a cache entry
       dnsA({
-        { name = "really.really.really.does.not.exist.thijsschreijer.nl", address = "1.2.3.4" },
+        { name = "really.really.really.does.not.exist.hostname.test", address = "1.2.3.4" },
       })
       sleep(2)  -- wait for timer to re-resolve the record
       targets.resolve_targets(b.targets)
@@ -1303,9 +1278,9 @@ describe("[round robin balancer]", function()
     end)
     it("renewed DNS A record; last host fails DNS resolution #slow", function()
       -- This test might show some error output similar to the lines below. This is expected and ok.
-      -- 2017/11/06 15:52:49 [warn] 5123#0: *2 [lua] balancer.lua:320: queryDns(): [ringbalancer] querying dns for really.really.really.does.not.exist.thijsschreijer.nl failed: dns server error: 3 name error, context: ngx.timer
+      -- 2017/11/06 15:52:49 [warn] 5123#0: *2 [lua] balancer.lua:320: queryDns(): [ringbalancer] querying dns for really.really.really.does.not.exist.hostname.test failed: dns server error: 3 name error, context: ngx.timer
 
-      local test_name = "really.really.really.does.not.exist.thijsschreijer.nl"
+      local test_name = "really.really.really.does.not.exist.hostname.test"
       local ttl = 0.1
       local staleTtl = 0   -- stale ttl = 0, force lookup upon expiring
       local record = dnsA({

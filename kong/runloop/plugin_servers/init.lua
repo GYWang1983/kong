@@ -1,14 +1,17 @@
 
 local proc_mgmt = require "kong.runloop.plugin_servers.process"
 local cjson = require "cjson.safe"
+local clone = require "table.clone"
 local ngx_ssl = require "ngx.ssl"
+local SIGTERM = 15
 
 local ngx = ngx
 local kong = kong
 local ngx_var = ngx.var
 local coroutine_running = coroutine.running
 local get_plugin_info = proc_mgmt.get_plugin_info
-local ngx_timer_at = ngx.timer.at
+local get_ctx_table = require("resty.core.ctx").get_ctx_table
+local subsystem = ngx.config.subsystem
 
 --- keep request data a bit longer, into the log timer
 local save_for_later = {}
@@ -57,6 +60,25 @@ local exposed_api = {
     ctx_shared[k] = v
   end,
 
+  ["kong.request.get_headers"] = function(max)
+    local saved = save_for_later[coroutine_running()]
+    return saved and saved.request_headers or kong.request.get_headers(max)
+  end,
+
+  ["kong.request.get_header"] = function(name)
+    local saved = save_for_later[coroutine_running()]
+    if not saved then
+      return kong.request.get_header(name)
+    end
+
+    local header_value = saved.request_headers[name]
+    if type(header_value) == "table" then
+      header_value = header_value[1]
+    end
+
+    return header_value
+  end,
+
   ["kong.response.get_status"] = function()
     local saved = save_for_later[coroutine_running()]
     return saved and saved.response_status or kong.response.get_status()
@@ -103,7 +125,7 @@ local function get_server_rpc(server_def)
 
     local rpc_modname = protocol_implementations[server_def.protocol]
     if not rpc_modname then
-      kong.log.error("Unknown protocol implementation: ", server_def.protocol)
+      kong.log.err("Unknown protocol implementation: ", server_def.protocol)
       return nil, "Unknown protocol implementation"
     end
 
@@ -220,23 +242,24 @@ local function build_phases(plugin)
   for _, phase in ipairs(plugin.phases) do
     if phase == "log" then
       plugin[phase] = function(self, conf)
-        local saved = {
-          plugin_name = self.name,
-          serialize_data = kong.log.serialize(),
-          ngx_ctx = ngx.ctx,
-          ctx_shared = kong.ctx.shared,
-          response_headers = ngx.resp.get_headers(100),
-          response_status = ngx.status,
-        }
-
-        ngx_timer_at(0, function()
+        _G.native_timer_at(0, function(premature, saved)
+          if premature then
+            return
+          end
+          get_ctx_table(saved.ngx_ctx)
           local co = coroutine_running()
           save_for_later[co] = saved
-
           server_rpc:handle_event(self.name, conf, phase)
-
           save_for_later[co] = nil
-        end)
+        end, {
+          plugin_name = self.name,
+          serialize_data = kong.log.serialize(),
+          ngx_ctx = clone(ngx.ctx),
+          ctx_shared = kong.ctx.shared,
+          request_headers = subsystem == "http" and ngx.req.get_headers(100) or nil,
+          response_headers = subsystem == "http" and ngx.resp.get_headers(100) or nil,
+          response_status = ngx.status,
+        })
       end
 
     else
@@ -296,7 +319,20 @@ function plugin_servers.start()
 
   for _, server_def in ipairs(proc_mgmt.get_server_defs()) do
     if server_def.start_command then
-      ngx_timer_at(0, pluginserver_timer, server_def)
+      _G.native_timer_at(0, pluginserver_timer, server_def)
+    end
+  end
+end
+
+function plugin_servers.stop()
+  if ngx.worker.id() ~= 0 then
+    kong.log.notice("only worker #0 can manage")
+    return
+  end
+
+  for _, server_def in ipairs(proc_mgmt.get_server_defs()) do
+    if server_def.proc then
+      server_def.proc:kill(SIGTERM)
     end
   end
 end

@@ -1,165 +1,66 @@
 local _M = {}
+local _MT = { __index = _M, }
 
 
 local semaphore = require("ngx.semaphore")
-local ws_client = require("resty.websocket.client")
 local cjson = require("cjson.safe")
+local config_helper = require("kong.clustering.config_helper")
+local clustering_utils = require("kong.clustering.utils")
 local declarative = require("kong.db.declarative")
 local constants = require("kong.constants")
 local utils = require("kong.tools.utils")
-local system_constants = require("lua_system_constants")
-local ffi = require("ffi")
+
+
 local assert = assert
 local setmetatable = setmetatable
-local type = type
 local math = math
 local pcall = pcall
 local tostring = tostring
+local sub = string.sub
 local ngx = ngx
 local ngx_log = ngx.log
 local ngx_sleep = ngx.sleep
 local cjson_decode = cjson.decode
 local cjson_encode = cjson.encode
-local kong = kong
 local exiting = ngx.worker.exiting
 local ngx_time = ngx.time
-local io_open = io.open
 local inflate_gzip = utils.inflate_gzip
-local deflate_gzip = utils.deflate_gzip
+local yield = utils.yield
 
 
-local KONG_VERSION = kong.version
-local CONFIG_CACHE = ngx.config.prefix() .. "/config.cache.json.gz"
 local ngx_ERR = ngx.ERR
 local ngx_DEBUG = ngx.DEBUG
-local ngx_INFO = ngx.INFO
 local ngx_WARN = ngx.WARN
 local ngx_NOTICE = ngx.NOTICE
-local MAX_PAYLOAD = constants.CLUSTERING_MAX_PAYLOAD
-local WS_OPTS = {
-  timeout = constants.CLUSTERING_TIMEOUT,
-  max_payload_len = MAX_PAYLOAD,
-}
 local PING_INTERVAL = constants.CLUSTERING_PING_INTERVAL
 local PING_WAIT = PING_INTERVAL * 1.5
 local _log_prefix = "[clustering] "
+local DECLARATIVE_EMPTY_CONFIG_HASH = constants.DECLARATIVE_EMPTY_CONFIG_HASH
 
 
 local function is_timeout(err)
-  return err and string.sub(err, -7) == "timeout"
+  return err and sub(err, -7) == "timeout"
 end
 
 
-function _M.new(parent)
+function _M.new(conf, cert, cert_key)
   local self = {
-    declarative_config = declarative.new_config(parent.conf),
+    declarative_config = declarative.new_config(conf),
+    conf = conf,
+    cert = cert,
+    cert_key = cert_key,
   }
 
-  return setmetatable(self, {
-    __index = function(tab, key)
-      return _M[key] or parent[key]
-    end,
-  })
+  return setmetatable(self, _MT)
 end
 
 
-function _M:update_config(config_table, config_hash, update_cache)
-  assert(type(config_table) == "table")
-
-  if not config_hash then
-    config_hash = self:calculate_config_hash(config_table)
-  end
-
-  local entities, err, _, meta, new_hash =
-              self.declarative_config:parse_table(config_table, config_hash)
-  if not entities then
-    return nil, "bad config received from control plane " .. err
-  end
-
-  if declarative.get_current_hash() == new_hash then
-    ngx_log(ngx_DEBUG, _log_prefix, "same config received from control plane, ",
-                   "no need to reload")
-    return true
-  end
-
-  -- NOTE: no worker mutex needed as this code can only be
-  -- executed by worker 0
-  local res, err =
-    declarative.load_into_cache_with_events(entities, meta, new_hash)
-  if not res then
-    return nil, err
-  end
-
-  if update_cache then
-    -- local persistence only after load finishes without error
-    local f, err = io_open(CONFIG_CACHE, "w")
-    if not f then
-      ngx_log(ngx_ERR, _log_prefix, "unable to open cache file: ", err)
-
-    else
-      res, err = f:write(assert(deflate_gzip(cjson_encode(config_table))))
-      if not res then
-        ngx_log(ngx_ERR, _log_prefix, "unable to write cache file: ", err)
-      end
-
-      f:close()
-    end
-  end
-
-  return true
-end
-
-
-function _M:init_worker()
+function _M:init_worker(plugins_list)
   -- ROLE = "data_plane"
 
+  self.plugins_list = plugins_list
+
   if ngx.worker.id() == 0 then
-    local f = io_open(CONFIG_CACHE, "r")
-    if f then
-      local config, err = f:read("*a")
-      if not config then
-        ngx_log(ngx_ERR, _log_prefix, "unable to read cached config file: ", err)
-      end
-
-      f:close()
-
-      if config and #config > 0 then
-        ngx_log(ngx_INFO, _log_prefix, "found cached copy of data-plane config, loading..")
-
-        local err
-
-        config, err = inflate_gzip(config)
-        if config then
-          config = cjson_decode(config)
-
-          if config then
-            local res
-            res, err = self:update_config(config)
-            if not res then
-              ngx_log(ngx_ERR, _log_prefix, "unable to update running config from cache: ", err)
-            end
-          end
-
-        else
-          ngx_log(ngx_ERR, _log_prefix, "unable to inflate cached config: ", err, ", ignoring...")
-        end
-      end
-
-    else
-      -- CONFIG_CACHE does not exist, pre create one with 0600 permission
-      local fd = ffi.C.open(CONFIG_CACHE, bit.bor(system_constants.O_RDONLY(),
-                                                  system_constants.O_CREAT()),
-                                          bit.bor(system_constants.S_IRUSR(),
-                                                  system_constants.S_IWUSR()))
-      if fd == -1 then
-        ngx_log(ngx_ERR, _log_prefix, "unable to pre-create cached config file: ",
-                ffi.string(ffi.C.strerror(ffi.errno())))
-
-      else
-        ffi.C.close(fd)
-      end
-    end
-
     assert(ngx.timer.at(0, function(premature)
       self:communicate(premature)
     end))
@@ -173,7 +74,7 @@ local function send_ping(c, log_suffix)
   local hash = declarative.get_current_hash()
 
   if hash == true then
-    hash = string.rep("0", 32)
+    hash = DECLARATIVE_EMPTY_CONFIG_HASH
   end
 
   local _, err = c:send_ping(hash)
@@ -195,33 +96,12 @@ function _M:communicate(premature)
 
   local conf = self.conf
 
-  -- TODO: pick one random CP
-  local address = conf.cluster_control_plane
-  local log_suffix = " [" .. address .. "]"
-
-  local c = assert(ws_client:new(WS_OPTS))
-  local uri = "wss://" .. address .. "/v1/outlet?node_id=" ..
-              kong.node.get_id() ..
-              "&node_hostname=" .. kong.node.get_hostname() ..
-              "&node_version=" .. KONG_VERSION
-
-  local opts = {
-    ssl_verify = true,
-    client_cert = self.cert,
-    client_priv_key = self.cert_key,
-  }
-  if conf.cluster_mtls == "shared" then
-    opts.server_name = "kong_clustering"
-  else
-    -- server_name will be set to the host if it is not explicitly defined here
-    if conf.cluster_server_name ~= "" then
-      opts.server_name = conf.cluster_server_name
-    end
-  end
-
+  local log_suffix = " [" .. conf.cluster_control_plane .. "]"
   local reconnection_delay = math.random(5, 10)
-  local res, err = c:connect(uri, opts)
-  if not res then
+
+  local c, uri, err = clustering_utils.connect_cp(
+                        "/v1/outlet", conf, self.cert, self.cert_key)
+  if not c then
     ngx_log(ngx_ERR, _log_prefix, "connection to control plane ", uri, " broken: ", err,
                  " (retrying after ", reconnection_delay, " seconds)", log_suffix)
 
@@ -268,29 +148,46 @@ function _M:communicate(premature)
 
   local ping_immediately
   local config_exit
+  local next_data
 
   local config_thread = ngx.thread.spawn(function()
     while not exiting() and not config_exit do
       local ok, err = config_semaphore:wait(1)
       if ok then
-        local config_table = self.next_config
-        local config_hash  = self.next_hash
-        if config_table then
-          local pok, res
-          pok, res, err = pcall(self.update_config, self, config_table, config_hash, true)
-          if pok then
-            if not res then
-              ngx_log(ngx_ERR, _log_prefix, "unable to update running config: ", err)
+        local data = next_data
+        if data then
+          local msg = assert(inflate_gzip(data))
+          yield()
+          msg = assert(cjson_decode(msg))
+          yield()
+
+          if msg.type == "reconfigure" then
+            if msg.timestamp then
+              ngx_log(ngx_DEBUG, _log_prefix, "received reconfigure frame from control plane with timestamp: ",
+                                 msg.timestamp, log_suffix)
+
+            else
+              ngx_log(ngx_DEBUG, _log_prefix, "received reconfigure frame from control plane", log_suffix)
             end
 
-            ping_immediately = true
+            local config_table = assert(msg.config_table)
+            local pok, res
+            pok, res, err = pcall(config_helper.update, self.declarative_config,
+                                  config_table, msg.config_hash, msg.hashes)
+            if pok then
+              if not res then
+                ngx_log(ngx_ERR, _log_prefix, "unable to update running config: ", err)
+              end
 
-          else
-            ngx_log(ngx_ERR, _log_prefix, "unable to update running config: ", res)
-          end
+              ping_immediately = true
 
-          if self.next_config == config_table then
-            self.next_config = nil
+            else
+              ngx_log(ngx_ERR, _log_prefix, "unable to update running config: ", res)
+            end
+
+            if next_data == data then
+              next_data = nil
+            end
           end
         end
 
@@ -340,28 +237,12 @@ function _M:communicate(premature)
         last_seen = ngx_time()
 
         if typ == "binary" then
-          data = assert(inflate_gzip(data))
-
-          local msg = assert(cjson_decode(data))
-
-          if msg.type == "reconfigure" then
-            if msg.timestamp then
-              ngx_log(ngx_DEBUG, _log_prefix, "received reconfigure frame from control plane with timestamp: ",
-                                 msg.timestamp, log_suffix)
-
-            else
-              ngx_log(ngx_DEBUG, _log_prefix, "received reconfigure frame from control plane", log_suffix)
-            end
-
-            self.next_config = assert(msg.config_table)
-            self.next_hash = msg.config_hash
-
-            if config_semaphore:count() <= 0 then
-              -- the following line always executes immediately after the `if` check
-              -- because `:count` will never yield, end result is that the semaphore
-              -- count is guaranteed to not exceed 1
-              config_semaphore:post()
-            end
+          next_data = data
+          if config_semaphore:count() <= 0 then
+            -- the following line always executes immediately after the `if` check
+            -- because `:count` will never yield, end result is that the semaphore
+            -- count is guaranteed to not exceed 1
+            config_semaphore:post()
           end
 
         elseif typ == "pong" then
@@ -391,8 +272,8 @@ function _M:communicate(premature)
   -- the config thread might be holding a lock if it's in the middle of an
   -- update, so we need to give it a chance to terminate gracefully
   config_exit = true
-  ok, err, perr = ngx.thread.wait(config_thread)
 
+  ok, err, perr = ngx.thread.wait(config_thread)
   if not ok then
     ngx_log(ngx_ERR, _log_prefix, err, log_suffix)
 

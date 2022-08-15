@@ -3,6 +3,8 @@ local helpers = require "spec.helpers"
 local utils   = require "kong.tools.utils"
 local admin_api = require "spec.fixtures.admin_api"
 local sha256 = require "resty.sha256"
+local jwt_encoder = require "kong.plugins.jwt.jwt_parser"
+
 
 local math_random = math.random
 local string_char = string.char
@@ -11,6 +13,14 @@ local string_rep = string.rep
 
 
 local ngx_encode_base64 = ngx.encode_base64
+
+
+local PAYLOAD = {
+  iss = nil,
+  nbf = os.time(),
+  iat = os.time(),
+  exp = os.time() + 3600
+}
 
 
 local kong = {
@@ -141,6 +151,7 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
       "consumers",
       "plugins",
       "keyauth_credentials",
+      "jwt_secrets",
       "oauth2_credentials",
       "oauth2_authorization_codes",
       "oauth2_tokens",
@@ -362,7 +373,7 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
 
       local service_grpc = assert(admin_api.services:insert {
           name = "grpc",
-          url = "grpc://localhost:15002",
+          url = helpers.grpcbin_url,
         })
 
       local route_grpc = assert(admin_api.routes:insert {
@@ -1276,7 +1287,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
           assert.are.equal("email profile", body.headers["x-authenticated-scope"])
           assert.are.equal("userid123", body.headers["x-authenticated-userid"])
           assert.are.equal("clientid123", body.headers["x-credential-identifier"])
-          assert.are.equal(nil, body.headers["x-credential-username"])
         end)
       end)
 
@@ -1640,7 +1650,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
           assert.are.equal("email", body.headers["x-authenticated-scope"])
           assert.are.equal("hello", body.headers["x-authenticated-userid"])
           assert.are.equal("clientid123", body.headers["x-credential-identifier"])
-          assert.are.equal(nil, body.headers["x-credential-username"])
         end)
         it("works in a multipart request", function()
           local res = assert(proxy_ssl_client:send {
@@ -1888,7 +1897,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
           assert.are.equal("email", body.headers["x-authenticated-scope"])
           assert.are.equal("id123", body.headers["x-authenticated-userid"])
           assert.are.equal("clientid123", body.headers["x-credential-identifier"])
-          assert.are.equal(nil, body.headers["x-credential-username"])
         end)
       end)
     end)
@@ -2098,7 +2106,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         assert.are.equal("email", body.headers["x-authenticated-scope"])
         assert.are.equal("userid123", body.headers["x-authenticated-userid"])
         assert.are.equal("clientid123", body.headers["x-credential-identifier"])
-        assert.are.equal(nil, body.headers["x-credential-username"])
       end)
       it("fails when an authorization code is used more than once", function()
         local code = provision_code()
@@ -2938,7 +2945,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         assert.are.equal("userid123", body.headers["x-authenticated-userid"])
         assert.are.equal("email", body.headers["x-authenticated-scope"])
         assert.are.equal("clientid123", body.headers["x-credential-identifier"])
-        assert.are.equal(nil, body.headers["x-credential-username"])
         assert.is_nil(body.headers["x-anonymous-consumer"])
       end)
 
@@ -3007,7 +3013,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         assert.are.equal("userid123", body.headers["x-authenticated-userid"])
         assert.are.equal("email", body.headers["x-authenticated-scope"])
         assert.are.equal("clientid123", body.headers["x-credential-identifier"])
-        assert.are.equal(nil, body.headers["x-credential-username"])
         assert.is_nil(body.headers["x-anonymous-consumer"])
       end)
       it("works with wrong credentials and anonymous", function()
@@ -3022,7 +3027,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         assert.are.equal("true", body.headers["x-anonymous-consumer"])
         assert.equal('no-body', body.headers["x-consumer-username"])
         assert.are.equal(nil, body.headers["x-credential-identifier"])
-        assert.are.equal(nil, body.headers["x-credential-username"])
 
       end)
       it("works with wrong credentials and username in anonymous", function()
@@ -3624,6 +3628,7 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
     local user2
     local anonymous
     local keyauth
+    local jwt_secret
 
     lazy_setup(function()
       local service1 = admin_api.services:insert({
@@ -3668,8 +3673,22 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         service    = service2
       }))
 
+      local route3 = assert(admin_api.routes:insert({
+        hosts      = { "logical-or-jwt.com" },
+        protocols  = { "http", "https" },
+        service    = service2
+      }))
+
       admin_api.oauth2_plugins:insert({
         route = { id = route2.id },
+        config   = {
+          scopes    = { "email", "profile", "user.email" },
+          anonymous = anonymous.id,
+        },
+      })
+
+      admin_api.oauth2_plugins:insert({
+        route = { id = route3.id },
         config   = {
           scopes    = { "email", "profile", "user.email" },
           anonymous = anonymous.id,
@@ -3684,9 +3703,21 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         },
       }
 
+      admin_api.plugins:insert {
+        name     = "jwt",
+        route = { id = route3.id },
+        config   = {
+          anonymous = anonymous.id,
+        },
+      }
+
       keyauth = admin_api.keyauth_credentials:insert({
         key      = "Mouse",
         consumer = { id = user1.id },
+      })
+
+      jwt_secret = admin_api.jwt_secrets:insert({
+        consumer = { id = user1.id }
       })
 
       admin_api.oauth2_credentials:insert {
@@ -3730,7 +3761,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
 
         local client_id = assert.request(res).has.header("x-credential-identifier")
         assert.equal(keyauth.id, client_id)
-        assert.request(res).has.no.header("x-credential-username")
       end)
 
       it("fails 401, with only the first credential provided", function()
@@ -3795,18 +3825,20 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         assert(id == user1.id or id == user2.id)
         local client_id = assert.request(res).has.header("x-credential-identifier")
         assert.equal("clientid4567", client_id)
-        assert.request(res).has.no.header("x-credential-username")
       end)
 
-      it("passes with only the first credential provided", function()
+      it("passes with only the first credential provided (higher priority)", function()
         local res = assert(proxy_client:send {
           method  = "GET",
           path = "/request",
           headers = {
             ["Host"] = "logical-or.com",
             ["apikey"] = "Mouse",
+            ["X-Authenticated-Scope"] = "all-access",
+            ["X-Authenticated-UserId"] = "admin",
           }
         })
+
         assert.response(res).has.status(200)
         assert.request(res).has.no.header("x-anonymous-consumer")
         local id = assert.request(res).has.header("x-consumer-id")
@@ -3814,7 +3846,34 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         assert.equal(user1.id, id)
         local client_id = assert.request(res).has.header("x-credential-identifier")
         assert.equal(keyauth.id, client_id)
-        assert.request(res).has.no.header("x-credential-username")
+        assert.request(res).has.no.header("x-authenticated-scope")
+        assert.request(res).has.no.header("x-authenticated-userid")
+      end)
+
+      it("passes with only the first credential provided (lower priority)", function()
+        PAYLOAD.iss = jwt_secret.key
+        local jwt = jwt_encoder.encode(PAYLOAD, jwt_secret.secret)
+        local authorization = "Bearer " .. jwt
+        local res = assert(proxy_client:send {
+          method  = "GET",
+          path = "/request",
+          headers = {
+            ["Host"] = "logical-or-jwt.com",
+            ["Authorization"] = authorization,
+            ["X-Authenticated-Scope"] = "all-access",
+            ["X-Authenticated-UserId"] = "admin",
+          }
+        })
+
+        assert.response(res).has.status(200)
+        assert.request(res).has.no.header("x-anonymous-consumer")
+        local id = assert.request(res).has.header("x-consumer-id")
+        assert.not_equal(id, anonymous.id)
+        assert.equal(user1.id, id)
+        local client_id = assert.request(res).has.header("x-credential-identifier")
+        assert.equal(jwt_secret.key, client_id)
+        assert.request(res).has.no.header("x-authenticated-scope")
+        assert.request(res).has.no.header("x-authenticated-userid")
       end)
 
       it("passes with only the second credential provided", function()
@@ -3835,7 +3894,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         assert.equal(user2.id, id)
         local client_id = assert.request(res).has.header("x-credential-identifier")
         assert.equal("clientid4567", client_id)
-        assert.request(res).has.no.header("x-credential-username")
       end)
 
       it("passes with no credential provided", function()
@@ -3851,7 +3909,6 @@ describe("Plugin: oauth2 [#" .. strategy .. "]", function()
         local id = assert.request(res).has.header("x-consumer-id")
         assert.equal(id, anonymous.id)
         assert.request(res).has.no.header("x-credential-identifier")
-        assert.request(res).has.no.header("x-credential-username")
       end)
     end)
   end)

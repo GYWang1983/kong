@@ -6,8 +6,6 @@
 --- maybe it could eventually be merged into the DAO object?
 ---
 
-local singletons = require "kong.singletons"
-
 local dns_client = require "kong.resty.dns.client"
 local upstreams = require "kong.runloop.balancer.upstreams"
 local balancers = require "kong.runloop.balancer.balancers"
@@ -22,11 +20,13 @@ local string_match  = string.match
 local ipairs = ipairs
 local tonumber = tonumber
 local table_sort = table.sort
---local assert = assert
+local assert = assert
+local exiting = ngx.worker.exiting
 
+local CRIT = ngx.CRIT
+local DEBUG = ngx.DEBUG
 local ERR = ngx.ERR
 local WARN = ngx.WARN
-local DEBUG = ngx.DEBUG
 
 local SRV_0_WEIGHT = 1      -- SRV record with weight 0 should be hit minimally, hence we replace by 1
 local EMPTY = setmetatable({},
@@ -38,11 +38,15 @@ local targets_M = {}
 
 -- forward local declarations
 local resolve_timer_callback
+local resolve_timer_running
 local queryDns
 
 function targets_M.init()
   dns_client = require("kong.tools.dns")(kong.configuration)    -- configure DNS client
-  ngx.timer.every(1, resolve_timer_callback)
+
+  if not resolve_timer_running then
+    resolve_timer_running = assert(ngx.timer.at(1, resolve_timer_callback))
+  end
 end
 
 
@@ -67,7 +71,7 @@ end
 -- @return The target array, with target entity tables.
 local function load_targets_into_memory(upstream_id)
 
-  local targets, err, err_t = singletons.db.targets:select_by_upstream_raw(
+  local targets, err, err_t = kong.db.targets:select_by_upstream_raw(
       { id = upstream_id }, GLOBAL_QUERY_OPTS)
 
   if not targets then
@@ -98,7 +102,7 @@ end
 function targets_M.fetch_targets(upstream)
   local targets_cache_key = "balancer:targets:" .. upstream.id
 
-  return singletons.core_cache:get(
+  return kong.core_cache:get(
       targets_cache_key, nil,
       load_targets_into_memory, upstream.id)
 end
@@ -129,7 +133,7 @@ function targets_M.on_target_event(operation, target)
   log(DEBUG, "target ", operation, " for upstream ", upstream_id,
     upstream_name and " (" .. upstream_name ..")" or "")
 
-  singletons.core_cache:invalidate_local("balancer:targets:" .. upstream_id)
+  kong.core_cache:invalidate_local("balancer:targets:" .. upstream_id)
 
   local upstream = upstreams.get_upstream_by_id(upstream_id)
   if not upstream then
@@ -224,17 +228,30 @@ end
 
 
 -- Timer invoked to update DNS records
-function resolve_timer_callback()
+function resolve_timer_callback(premature)
+  if premature then
+    return
+  end
+
   local now = ngx_now()
 
   while (renewal_heap:peekValue() or math.huge) < now do
     local key    = renewal_heap:pop()
     local target = renewal_weak_cache[key] -- can return nil if GC'ed
-
     if target then
       log(DEBUG, "executing requery for: ", target.name)
       queryDns(target, false) -- timer-context; cacheOnly always false
     end
+  end
+
+  if exiting() then
+    return
+  end
+
+  local err
+  resolve_timer_running, err = ngx.timer.at(1, resolve_timer_callback)
+  if not resolve_timer_running then
+    log(CRIT, "could not reschedule DNS resolver timer: ", err)
   end
 end
 

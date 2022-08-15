@@ -143,7 +143,7 @@ local function new_balancer(opts)
       },
     },
   }
-  local my_upstream = { id=upname, name=upname, ws_id=ws_id, slots=10, healthchecks=hc_defaults, algorithm="consistent-hashing" }
+  local my_upstream = { id=upname, name=upname, ws_id=ws_id, slots=opts.wheelSize or 10, healthchecks=hc_defaults, algorithm="consistent-hashing" }
   local b = (balancers.create_balancer(my_upstream, true))
 
   for k, v in pairs{
@@ -213,9 +213,12 @@ describe("[consistent_hashing]", function()
     healthcheckers.init()
     balancers.init()
 
-    local singletons = require "kong.singletons"
-    singletons.worker_events = require "resty.worker.events"
-    singletons.worker_events.configure({
+    local kong = {}
+
+    _G.kong = kong
+
+    kong.worker_events = require "resty.worker.events"
+    kong.worker_events.configure({
       shm = "kong_process_events", -- defined by "lua_shared_dict"
       timeout = 5,            -- life time of event data in shm
       interval = 1,           -- poll interval (seconds)
@@ -228,7 +231,7 @@ describe("[consistent_hashing]", function()
       return function() end
     end
 
-    singletons.db = {
+    kong.db = {
       targets = {
         each = empty_each,
         select_by_upstream_raw = function()
@@ -241,7 +244,7 @@ describe("[consistent_hashing]", function()
       },
     }
 
-    singletons.core_cache = {
+    kong.core_cache = {
       _cache = {},
       get = function(self, key, _, loader, arg)
         local v = self._cache[key]
@@ -470,7 +473,7 @@ describe("[consistent_hashing]", function()
       --b:removeHost("12.34.56.78", 123)
       b.targets[1].addresses[1].disabled = true
       b:deleteDisabledAddresses(b.targets[1])
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(1, count_add)
       assert.equal(1, count_remove)
     end)
@@ -505,14 +508,14 @@ describe("[consistent_hashing]", function()
         { name = "mashape.com", address = "12.34.56.78" },
       })
       add_target(b, "mashape.com", 123, 100)
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(2, count_add)
       assert.equal(0, count_remove)
 
       b.targets[1].addresses[1].disabled = true
       b.targets[1].addresses[2].disabled = true
       b:deleteDisabledAddresses(b.targets[1])
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(2, count_add)
       assert.equal(2, count_remove)
     end)
@@ -553,7 +556,7 @@ describe("[consistent_hashing]", function()
         { name = "mashape.com", target = "mashape2.com", port = 8002, weight = 5 },
       })
       add_target(b, "mashape.com", 123, 100)
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(2, count_add)
       assert.equal(0, count_remove)
 
@@ -561,7 +564,7 @@ describe("[consistent_hashing]", function()
       b.targets[1].addresses[1].disabled = true
       b.targets[1].addresses[2].disabled = true
       b:deleteDisabledAddresses(b.targets[1])
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.equal(2, count_add)
       assert.equal(2, count_remove)
     end)
@@ -582,7 +585,7 @@ describe("[consistent_hashing]", function()
           -- this callback is called when updating. So yield here and
           -- verify that the second thread does not interfere with
           -- the first update, yielded here.
-          ngx.sleep(0.1)
+          ngx.sleep(0)
         end
       })
       dnsA({
@@ -603,7 +606,7 @@ describe("[consistent_hashing]", function()
       end)
       ngx.thread.wait(t1)
       ngx.thread.wait(t2)
-      ngx.sleep(0.1)
+      ngx.sleep(0)
       assert.same({
         [1] = 'thread1 start',
         [2] = 'thread1 end',
@@ -822,7 +825,7 @@ describe("[consistent_hashing]", function()
     end)
     it("weight change for unresolved record, updates properly", function()
       local record = dnsA({
-        { name = "really.really.really.does.not.exist.thijsschreijer.nl", address = "1.2.3.4" },
+        { name = "really.really.really.does.not.exist.host.test", address = "1.2.3.4" },
       })
       dnsAAAA({
         { name = "getkong.org", address = "::1" },
@@ -832,7 +835,7 @@ describe("[consistent_hashing]", function()
         wheelSize = 1000,
         requery = 1,
       })
-      add_target(b, "really.really.really.does.not.exist.thijsschreijer.nl", 80, 10)
+      add_target(b, "really.really.really.does.not.exist.host.test", 80, 10)
       add_target(b, "getkong.org", 80, 10)
       local count = count_indices(b)
       assert.same({
@@ -844,7 +847,7 @@ describe("[consistent_hashing]", function()
       record.expire = 0
       record.expired = true
       -- do a lookup to trigger the async lookup
-      client.resolve("really.really.really.does.not.exist.thijsschreijer.nl", {qtype = client.TYPE_A})
+      client.resolve("really.really.really.does.not.exist.host.test", {qtype = client.TYPE_A})
       sleep(1) -- provide time for async lookup to complete
 
       --b:_hit_all() -- hit them all to force renewal
@@ -857,10 +860,10 @@ describe("[consistent_hashing]", function()
       }, count)
 
       -- update the failed record
-      add_target(b, "really.really.really.does.not.exist.thijsschreijer.nl", 80, 20)
+      add_target(b, "really.really.really.does.not.exist.host.test", 80, 20)
       -- reinsert a cache entry
       dnsA({
-        { name = "really.really.really.does.not.exist.thijsschreijer.nl", address = "1.2.3.4" },
+        { name = "really.really.really.does.not.exist.host.test", address = "1.2.3.4" },
       })
       --sleep(2)  -- wait for timer to re-resolve the record
       targets.resolve_targets(b.targets)
