@@ -718,7 +718,7 @@ local MetaSchema = Schema.new({
     end
 
     local cache_key = schema.cache_key
-    if type(schema.cache_key) == 'table' then
+    if type(cache_key) == 'table' then
       local found
       for i = 1, #cache_key do
         found = nil
@@ -740,9 +740,9 @@ local MetaSchema = Schema.new({
         if found and not found.unique then
           errors["cache_key"] = meta_errors.CACHE_KEY_UNIQUE
         end
-      elseif type(schema.cache_key) ~= 'function' then
-        errors["cache_key"] = meta_errors.CACHE_KEY
       end
+    elseif cache_key and type(cache_key) ~= 'function' then
+        errors["cache_key"] = meta_errors.CACHE_KEY
     end
 
     if schema.subschema_key then

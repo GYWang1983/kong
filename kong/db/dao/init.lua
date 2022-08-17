@@ -651,8 +651,6 @@ local function find_cascade_delete_entities(self, entity, show_ws_id)
         insert(entries, { dao = dao, entity = row })
       end
     end
-
-    ::continue::
   end
 
   return entries
@@ -1319,7 +1317,7 @@ function DAO:select_by_cache_key(cache_key, options)
     cache_key = self:cache_key(cache_key)
   end
 
-  if type(ck_definition) ~= 'function' and #ck_definition == 1 then
+  if type(ck_definition) == 'table' and #ck_definition == 1 then
     return self["select_by_" .. ck_definition[1]](self, cache_key, options)
   end
 
@@ -1464,8 +1462,9 @@ function DAO:cache_key(key, arg2, arg3, arg4, arg5, ws_id)
   end
 
   -- Customer defined cache key function
-  if type(self.schema.cache_key) == 'function' then
-    return self.schema.cache_key(key, arg2, arg3, arg4, arg5, ws_id)
+  local ck_definition = self.schema.cache_key
+  if type(ck_definition) == 'function' then
+    return ck_definition(key, arg2, arg3, arg4, arg5, ws_id)
   end
 
   -- Fast path: passing the cache_key/primary_key entries in
@@ -1495,7 +1494,7 @@ function DAO:cache_key(key, arg2, arg3, arg4, arg5, ws_id)
 
   local values = new_tab(7, 0)
   values[1] = self.schema.name
-  local source = self.schema.cache_key or self.schema.primary_key
+  local source = ck_definition or self.schema.primary_key
 
   local i = 2
   for j = 1, #source do
