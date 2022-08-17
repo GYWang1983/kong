@@ -1,4 +1,4 @@
-FROM kong:2.5.1
+FROM kong:2.8.1
 
 ARG proxy=""
 
@@ -17,6 +17,7 @@ RUN /bin/sh -c set -ex \
     && git config --global http.version HTTP/1.1 \
     && luarocks install lua-zlib \
     && luarocks install xmlua \
+    && luarocks install lua-resty-cookie \
     && apk del .build-deps
 USER kong
 
