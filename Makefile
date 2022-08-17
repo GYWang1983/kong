@@ -7,7 +7,7 @@ BUSTED_ARGS ?= -v
 TEST_CMD ?= bin/busted $(BUSTED_ARGS)
 
 IMAGE_NAME ?= package.hundsun.com/orca1.0-docker-test-local/orca/kong
-IMAGE_TAG ?= 2.5.1-orca-20220629-1
+IMAGE_TAG ?= 2.8.1-orca-20220817-1
 
 ifeq ($(OS), darwin)
 OPENSSL_DIR ?= /usr/local/opt/openssl
