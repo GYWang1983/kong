@@ -4,6 +4,7 @@ local kong_session = require "kong.plugins.session.session"
 
 local ngx = ngx
 local kong = kong
+local type = type
 local concat = table.concat
 
 
@@ -32,7 +33,7 @@ local function authenticate(consumer, credential_id, groups)
     clear_header(constants.HEADERS.CONSUMER_USERNAME)
   end
 
-  if groups then
+  if type(groups) == 'table' then
     set_header(constants.HEADERS.AUTHENTICATED_GROUPS, concat(groups, ", "))
     ngx.ctx.authenticated_groups = groups
   else
@@ -84,7 +85,7 @@ function _M.execute(conf)
   end
 
 
-  local cid, credential, groups = kong_session.retrieve_session_data(s)
+  local cid, credential, groups, args = kong_session.retrieve_session_data(s)
 
   local consumer_cache_key = kong.db.consumers:cache_key(cid)
   local consumer, err = kong.cache:get(consumer_cache_key, nil,
@@ -104,7 +105,7 @@ function _M.execute(conf)
   s:start()
 
   authenticate(consumer, credential, groups)
-
+  ngx.ctx.authenticated_args = args
   kong.ctx.shared.authenticated_session = s
 end
 

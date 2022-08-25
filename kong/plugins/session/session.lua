@@ -51,7 +51,7 @@ function _M.retrieve_session_data(s)
     return
   end
 
-  return s.data[1], s.data[2], s.data[3]
+  return s.data[1], s.data[2], s.data[3], s.data[4]
 end
 
 
@@ -60,7 +60,8 @@ end
 -- @param consumer - the consumer id
 -- @param credential - the credential id or potentially just the consumer id
 -- @param groups - table of authenticated_groups e.g. { "group1" }
-function _M.store_session_data(s, consumer_id, credential_id, groups)
+-- @param args - table of authenticated_args e.g. { role = "role" }
+function _M.store_session_data(s, consumer_id, credential_id, groups, args)
   if not s then
     return
   end
@@ -68,6 +69,7 @@ function _M.store_session_data(s, consumer_id, credential_id, groups)
   s.data[1] = consumer_id
   s.data[2] = credential_id
   s.data[3] = groups
+  s.data[4] = args
 end
 
 

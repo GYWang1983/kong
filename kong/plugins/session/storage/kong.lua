@@ -45,7 +45,7 @@ end
 
 
 function storage:insert_session(id, data, ttl)
-  return kong.db.sessions:insert({
+  return kong.db.sessions:upsert_by_session_id(id, {
     session_id = id,
     data       = data,
     expires    = self.session.now + ttl,
