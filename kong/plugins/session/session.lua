@@ -3,6 +3,7 @@ local resty_session = require "resty.session"
 
 
 local kong = kong
+local type = type
 local ipairs = ipairs
 
 
@@ -51,6 +52,9 @@ function _M.retrieve_session_data(s)
     return
   end
 
+  if type(s.data[3]) ~= 'table' then
+    s.data[3] = nil
+  end
   return s.data[1], s.data[2], s.data[3], s.data[4]
 end
 

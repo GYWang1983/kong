@@ -4,7 +4,6 @@ local kong_session = require "kong.plugins.session.session"
 
 local ngx = ngx
 local kong = kong
-local type = type
 local concat = table.concat
 
 
@@ -33,7 +32,7 @@ local function authenticate(consumer, credential_id, groups)
     clear_header(constants.HEADERS.CONSUMER_USERNAME)
   end
 
-  if type(groups) == 'table' then
+  if groups then
     set_header(constants.HEADERS.AUTHENTICATED_GROUPS, concat(groups, ", "))
     ngx.ctx.authenticated_groups = groups
   else
