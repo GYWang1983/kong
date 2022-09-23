@@ -177,6 +177,11 @@ local DYNAMIC_KEY_NAMESPACES = {
     prefix = "vault_",
     ignore = EMPTY,
   },
+  {
+    injected_conf_name = "orca",
+    prefix = "orca_",
+    ignore = EMPTY,
+  }
 }
 
 
