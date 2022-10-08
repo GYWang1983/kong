@@ -319,7 +319,7 @@ Schema.validators = {
   end,
 
   timestamp = function(value)
-    return value > 0 or nil
+    return value >= 0 or nil
   end,
 
   uuid = function(value)
