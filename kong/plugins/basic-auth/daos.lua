@@ -1,3 +1,4 @@
+local tablex   = require "pl.tablex"
 local typedefs = require "kong.db.schema.typedefs"
 local crypto = require "kong.plugins.basic-auth.crypto"
 
@@ -13,9 +14,11 @@ return {
     fields = {
       { id = typedefs.uuid },
       { created_at = typedefs.auto_timestamp_s },
+      { expire_at  = { type = "integer", timestamp = true, default = 0 } },
       { consumer = { type = "foreign", reference = "consumers", required = true, on_delete = "cascade" }, },
       { username = { type = "string", required = true, unique = true }, },
       { password = { type = "string", required = true, encrypted = true }, }, -- encrypted = true is a Kong Enterprise Exclusive feature, it does nothing in Kong CE
+      { status   = { type = "set", elements = { type = "string" } }, },
       { tags     = typedefs.tags },
     },
     transformations = {
@@ -24,6 +27,12 @@ return {
         needs = { "consumer.id" },
         on_write = function(password, consumer_id)
           return { password = crypto.hash(consumer_id, password) }
+        end,
+      },
+      {
+        input = { "status" },
+        on_read = function(status)
+          return { status = tablex.makeset(status) }
         end,
       },
     },
