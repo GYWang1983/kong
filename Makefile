@@ -6,8 +6,11 @@ WIN_SCRIPTS = "bin/busted" "bin/kong"
 BUSTED_ARGS ?= -v
 TEST_CMD ?= bin/busted $(BUSTED_ARGS)
 
+KONG_BASE_TAG ?= $(shell git branch --show-current | awk '{split($$0,a,"/"); print a[2]}')
+
 IMAGE_NAME ?= package.hundsun.com/orca1.0-docker-test-local/orca/kong
-IMAGE_TAG ?= 2.8.1-orca-20220817-1
+IMAGE_SEQ ?= 1
+IMAGE_TAG ?= $(KONG_BASE_TAG)-orca-`date +"%Y%m%d"`-$(IMAGE_SEQ)
 
 ifeq ($(OS), darwin)
 OPENSSL_DIR ?= /usr/local/opt/openssl
@@ -173,7 +176,17 @@ fix-windows:
 	  chmod 0755 $$script ; \
 	done;
 
-docker-buildx:
+kong-patch:
+	@rm -rf .kong-patch
+	@mkdir .kong-patch
+	@for f in `git -P diff --name-only $(KONG_BASE_TAG) | grep "^kong/"`; do \
+	  rsync -R $$f .kong-patch; \
+	done;
+
+docker-build-local: kong-patch
+	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
+
+docker-buildx: kong-patch
 	docker buildx build \
         --builder kong \
 		--platform linux/amd64,linux/arm64 \

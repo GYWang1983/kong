@@ -4,6 +4,7 @@
 .project
 .idea
 .env
+.kong-patch/
 
 servroot*
 
@@ -26,3 +27,4 @@ bin/grpcurl
 
 *.so
 *.bak
+*.iml
