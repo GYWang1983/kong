@@ -35,6 +35,12 @@ lua_shared_dict kong_db_cache_miss_2        12m;
 lua_shared_dict kong_cassandra              5m;
 > end
 
+# additional dict
+> for _, cache in ipairs(additional_cache_directives) do
+lua_shared_dict additional_$(cache.name)_cache       $(cache.size);
+lua_shared_dict additional_$(cache.name)_cache_miss  $(cache.miss_size);
+> end
+
 underscores_in_headers on;
 > if ssl_ciphers then
 ssl_ciphers ${{SSL_CIPHERS}};
