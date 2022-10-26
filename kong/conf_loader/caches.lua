@@ -81,12 +81,8 @@ end
 -- @tparam table listener_config The listener configuration to parse.
 function parser.parse(conf)
   local cache_conf_all = conf['additional_caches']
-  if cache_conf_all then
-    local cnt = nkeys(cache_conf_all)
-    if cnt == 0 then
-      return false, usage
-    end
-
+  local cnt = cache_conf_all and nkeys(cache_conf_all) or 0
+  if cnt > 0 then
     local parsed = new_tab(0, cnt)
     local caches = setmetatable(new_tab(cnt, 0), _nop_tostring_mt)
     conf['additional_cache_directives'] = caches
