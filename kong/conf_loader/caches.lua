@@ -4,6 +4,7 @@ local new_tab    = require("table.new")
 
 local ngx      = ngx
 local re_match = ngx.re.match
+local insert   = table.insert
 local fmt      = string.format
 
 local parser = {}
@@ -85,16 +86,23 @@ function parser.parse(conf)
       return false, usage
     end
 
-    local parsed = setmetatable(new_tab(0, cnt), _nop_tostring_mt)
-    conf['additional_cache_directives'] = parsed
+    local parsed = new_tab(0, cnt)
+    local caches = setmetatable(new_tab(cnt, 0), _nop_tostring_mt)
+    conf['additional_cache_directives'] = caches
 
     for i = 1, cnt do
       local cache_conf, err = parse_cache(cache_conf_all[i])
       if err then
         return false, usage .. err
       end
-      parsed[cache_conf.name] = cache_conf
+      if parsed[cache_conf.name] then
+        return false, "duplicated additional cache name: " .. cache_conf.name
+      end
+      parsed[cache_conf.name] = true
+      insert(caches, cache_conf)
     end
+  else
+    conf['additional_cache_directives'] = {}
   end
   return true
 end
