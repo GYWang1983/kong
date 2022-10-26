@@ -638,6 +638,22 @@ function Kong.init_worker()
   end
   kong.core_cache = core_cache
 
+  local additional_caches, err = kong_global.init_additional_caches(kong.configuration, cluster_events, worker_events)
+  if err then
+    stash_init_worker_error("failed to instantiate additional caches: " .. err)
+    return
+  end
+
+  kong.get_cache = function(cache_name)
+    if not cache_name or cache_name == 'default' then
+      return cache
+    elseif cache_name == 'core' then
+      return core_cache
+    else
+      return additional_caches[cache_name]
+    end
+  end
+
   ok, err = runloop.set_init_versions_in_cache()
   if not ok then
     stash_init_worker_error(err) -- 'err' fully formatted

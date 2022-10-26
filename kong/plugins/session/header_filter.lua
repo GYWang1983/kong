@@ -19,6 +19,17 @@ local function get_authenticated_groups()
   return authenticated_groups
 end
 
+local function get_authenticated_args()
+  local authenticated_args = ngx.ctx.authenticated_args
+  if authenticated_args == nil then
+    return nil
+  end
+
+  assert(type(authenticated_args) == "table",
+    "invalid authenticated_args, a table was expected")
+
+  return authenticated_args
+end
 
 local _M = {}
 
@@ -41,9 +52,12 @@ function _M.execute(conf)
   local s = kong.ctx.shared.authenticated_session
   if s and s.present then
     local cid, cred_id = kong_session.retrieve_session_data(s)
-    if cred_id == credential_id and cid == consumer_id
-    then
-      return
+    if cred_id == credential_id and cid == consumer_id then
+      if ngx.ctx.flush_authenticated_session then
+        s:save()
+      else
+        return
+      end
     end
   end
 
@@ -51,11 +65,12 @@ function _M.execute(conf)
   -- create new session and save the data / send the Set-Cookie header
   if consumer_id then
     local groups = get_authenticated_groups()
+    local args = get_authenticated_args()
     s = s or kong_session.open_session(conf)
     kong_session.store_session_data(s,
                                     consumer_id,
                                     credential_id or consumer_id,
-                                    groups)
+                                    groups, args)
     s:save()
   end
 end
