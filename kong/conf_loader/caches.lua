@@ -4,6 +4,7 @@ local new_tab    = require("table.new")
 
 local ngx      = ngx
 local re_match = ngx.re.match
+local tonumber = tonumber
 local insert   = table.insert
 local fmt      = string.format
 
@@ -36,7 +37,7 @@ local function parse_ttl(ttl_conf)
   if not m then
     return nil, nil, nil, fmt("invalid ttl '%s'", ttl_conf)
   end
-  return m['ttl'], m['neg'], m['re']
+  return m['ttl'], m['neg'] or m['ttl'], m['re']
 end
 
 local function parse_cache(cache_conf)
@@ -68,9 +69,9 @@ local function parse_cache(cache_conf)
     name = name,
     size = size or '16m',
     miss_size = miss_size or '4m',
-    ttl = ttl or 0,
-    neg_ttl = neg_ttl or 0,
-    resurrect_ttl = resurrect_ttl or 0
+    ttl = ttl and tonumber(ttl) or 0,
+    neg_ttl = neg_ttl and tonumber(neg_ttl) or 0,
+    resurrect_ttl = resurrect_ttl and tonumber(resurrect_ttl) or 0
   }
 end
 
