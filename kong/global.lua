@@ -1,4 +1,5 @@
 -- TODO: get rid of 'kong.meta'; this module is king
+local new_tab = require("table.new")
 local meta = require "kong.meta"
 local PDK = require "kong.pdk"
 local phase_checker = require "kong.pdk.private.phases"
@@ -251,5 +252,29 @@ function _GLOBAL.init_core_cache(kong_config, cluster_events, worker_events)
   }
 end
 
+function _GLOBAL.init_additional_caches(kong_config, cluster_events, worker_events)
+  local additional = kong_config['additional_cache_directives']
+
+  local cnt = additional and #additional or 0
+  local caches = new_tab(0, cnt)
+  for i = 1, cnt do
+    local conf = additional[i]
+    local name = conf.name
+    local cache, err = kong_cache.new {
+      shm_name        = string.format("additional_%s_cache", name),
+      cluster_events  = cluster_events,
+      worker_events   = worker_events,
+      ttl             = conf.ttl,
+      neg_ttl         = conf.neg_ttl,
+      resurrect_ttl   = conf.resurrect_ttl,
+      resty_lock_opts = LOCK_OPTS,
+    }
+    if err then
+      return nil, err
+    end
+    caches[name] = cache
+  end
+  return caches
+end
 
 return _GLOBAL
