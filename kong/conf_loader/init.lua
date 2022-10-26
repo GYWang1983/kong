@@ -4,6 +4,7 @@ local pl_stringio = require "pl.stringio"
 local pl_stringx = require "pl.stringx"
 local constants = require "kong.constants"
 local listeners = require "kong.conf_loader.listeners"
+local caches    = require "kong.conf_loader.caches"
 local pl_pretty = require "pl.pretty"
 local pl_config = require "pl.config"
 local pl_file = require "pl.file"
@@ -657,6 +658,8 @@ local CONF_INFERENCES = {
   untrusted_lua = { enum = { "on", "off", "sandbox" } },
   untrusted_lua_sandbox_requires = { typ = "array" },
   untrusted_lua_sandbox_environment = { typ = "array" },
+
+  additional_caches = { typ = "array" },
 }
 
 
@@ -1683,6 +1686,12 @@ local function load(path, custom_conf, opts)
     { name = "status_listen",  flags = { "ssl" },    ssl_flag = "status_ssl_enabled" },
     { name = "cluster_listen", subsystem = "http" },
   })
+  if not ok then
+    return nil, err
+  end
+
+  -- lua_shared_dict for custom caches
+  ok, err = caches.parse(conf)
   if not ok then
     return nil, err
   end
