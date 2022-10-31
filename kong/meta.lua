@@ -13,10 +13,10 @@ local version = setmetatable({
 })
 
 return {
-  _NAME = "kong",
+  _NAME = "orca",
   _VERSION = tostring(version),
   _VERSION_TABLE = version,
-  _SERVER_TOKENS = "kong/" .. tostring(version),
+  _SERVER_TOKENS = "orca/" .. tostring(version),
   -- third-party dependencies' required version, as they would be specified
   -- to lua-version's `set()` in the form {from, to}
   _DEPENDENCIES = {
