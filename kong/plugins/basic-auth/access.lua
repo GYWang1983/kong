@@ -1,7 +1,7 @@
 local crypto = require "kong.plugins.basic-auth.crypto"
 local constants = require "kong.constants"
 
-
+local ngx = ngx
 local decode_base64 = ngx.decode_base64
 local re_gmatch = ngx.re.gmatch
 local re_match = ngx.re.match
@@ -81,6 +81,9 @@ local function validate_credentials(credential, given_password)
   return credential.password == digest
 end
 
+local function validate_expire_time(credential)
+  return not credential.expire_at or credential.expire_at <= 0 or credential.expire_at > ngx.time()
+end
 
 local function load_credential_into_memory(username)
   local credential, err = kong.db.basicauth_credentials:select_by_username(username)
@@ -149,15 +152,19 @@ end
 
 
 local function fail_authentication()
-  return false, { status = 401, message = "Invalid authentication credentials" }
+  return false, { status = 401, reason = "Invalid", message = "Invalid authentication credentials" }
 end
 
+local function expired_credential()
+  return false, { status = 401, reason = "Expired", message = "Expired authentication credentials" }
+end
 
 local function do_authentication(conf)
   -- If both headers are missing, return 401
   if not (kong.request.get_header("authorization") or kong.request.get_header("proxy-authorization")) then
-    return false, {
+    return true, {
       status = 401,
+      reason = "Unauthorized",
       message = "Unauthorized",
       headers = {
         ["WWW-Authenticate"] = realm
@@ -176,12 +183,18 @@ local function do_authentication(conf)
     given_username, given_password = retrieve_credentials("authorization", conf)
     if given_username and given_password then
       credential = load_credential_from_db(given_username)
-    else
-      return fail_authentication()
     end
   end
 
-  if not credential or not validate_credentials(credential, given_password) then
+  if not credential then
+    return fail_authentication()
+  end
+
+  if not validate_expire_time(credential) then
+    return expired_credential()
+  end
+
+  if not validate_credentials(credential, given_password) then
     return fail_authentication()
   end
 
@@ -207,9 +220,9 @@ function _M.execute(conf)
     return
   end
 
-  local ok, err = do_authentication(conf)
-  if not ok then
-    if conf.anonymous then
+  local continue, err = do_authentication(conf)
+  if err then
+    if continue and conf.anonymous then
       -- get anonymous user
       local consumer_cache_key = kong.db.consumers:cache_key(conf.anonymous)
       local consumer, err      = kong.cache:get(consumer_cache_key, nil,
@@ -220,7 +233,6 @@ function _M.execute(conf)
       end
 
       set_consumer(consumer)
-
     else
       return kong.response.error(err.status, err.message, err.headers)
     end
