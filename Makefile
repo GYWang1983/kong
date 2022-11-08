@@ -183,12 +183,12 @@ kong-patch:
 	  rsync -R $$f .kong-patch; \
 	done;
 
-docker-build-local: kong-patch
+image-local: kong-patch
 	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
-docker-buildx: kong-patch
+image: kong-patch
 	docker buildx build \
         --builder kong \
-		--platform linux/amd64,linux/arm64 \
+        --platform linux/amd64,linux/arm64 \
         --push \
         -t $(IMAGE_NAME):$(IMAGE_TAG) .
