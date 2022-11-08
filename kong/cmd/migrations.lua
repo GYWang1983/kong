@@ -26,6 +26,8 @@ The available commands are:
 
   reset                             Reset the database.
 
+  status                            Show status of database.
+
 Options:
  -y,--yes                           Assume "yes" to prompts and run
                                     non-interactively.
@@ -193,6 +195,35 @@ local function execute(args)
       force = args.force,
     })
 
+  elseif args.command == "status" then
+    if schema_state.needs_bootstrap then
+      log(migrations_utils.NEEDS_BOOTSTRAP_MSG)
+      os.exit(3)
+    end
+
+    if schema_state.pending_migrations and schema_state.new_migrations then
+      log.warn("Database has pending migrations from a previous upgrade, " ..
+        "and new migrations from this upgrade (version %s)",
+        tostring(meta._VERSION))
+      log("\nRun 'kong migrations finish' when ready to complete pending " ..
+        "migrations (%s %s will be incompatible with the previous Kong " ..
+        "version)", db.strategy, db.infos.db_desc)
+      os.exit(4)
+    end
+
+    if schema_state.pending_migrations then
+      log("Pending migrations:\n%s", schema_state.pending_migrations)
+      log("Run 'kong migrations finish' when ready")
+      os.exit(4)
+    end
+
+    if schema_state.new_migrations then
+      log("New migrations available:\n%s", schema_state.new_migrations)
+      log("Run 'kong migrations up' to proceed")
+      os.exit(5)
+    end
+    log("ok")
+
   else
     error("unreachable")
   end
@@ -208,5 +239,6 @@ return {
     finish = true,
     list = true,
     reset = true,
+    status = true,
   }
 }
