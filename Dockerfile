@@ -18,6 +18,7 @@ RUN /bin/sh -c set -ex \
     && luarocks install lua-zlib \
     && luarocks install xmlua \
     && luarocks install lua-resty-cookie \
+    && luarocks install lua-resty-template \
     && apk del .build-deps
 USER kong
 
