@@ -1,5 +1,5 @@
 local kong_session = require "kong.plugins.session.session"
-
+local hooks = require "kong.hooks"
 
 local ngx = ngx
 local kong = kong
@@ -75,5 +75,16 @@ function _M.execute(conf)
   end
 end
 
+function _M.register_post_hook()
+  hooks.register_hook("plugins_iterator:header_filter:post", function()
+    if kong.response.get_status() == 401 then
+      local s = kong.ctx.shared.authenticated_session
+      if s and s.present then
+        kong.log.debug("invalidate session in plugins_iterator:header_filter:post hook")
+        return s:destroy()
+      end
+    end
+  end)
+end
 
 return _M
