@@ -85,6 +85,7 @@ local balancer = require "kong.runloop.balancer"
 local kong_error_handlers = require "kong.error_handlers"
 local migrations_utils = require "kong.cmd.utils.migrations"
 local plugin_servers = require "kong.runloop.plugin_servers"
+local hooks = require "kong.hooks"
 
 local kong             = kong
 local ngx              = ngx
@@ -326,6 +327,7 @@ local function execute_collected_plugins_iterator(plugins_iterator, phase, ctx)
     plugin.handler[phase](plugin.handler, configuration)
     reset_plugin_context(ctx, old_ws)
   end
+  hooks.run_hook(table.concat({ "plugins_iterator", phase, "post" }, ":"), ctx)
 end
 
 
