@@ -1,5 +1,6 @@
 local crypto = require "kong.plugins.basic-auth.crypto"
 local constants = require "kong.constants"
+local sandbox = require "kong.tools.sandbox".sandbox
 
 local ngx = ngx
 local decode_base64 = ngx.decode_base64
@@ -11,6 +12,17 @@ local kong = kong
 
 local realm = 'Basic realm="' .. _KONG._NAME .. '"'
 
+local sandbox_opts = { env = {
+  kong = kong,
+  ngx = ngx,
+  md5    = require("resty.md5"),
+  sha1   = require("resty.sha1"),
+  sha224 = require("resty.sha224"),
+  sha256 = require("resty.sha256"),
+  sha384 = require("resty.sha384"),
+  sha512 = require("resty.sha512"),
+  to_hex = require("resty.string").to_hex,
+} }
 
 local _M = {}
 
@@ -72,7 +84,16 @@ end
 -- @param credential The retrieved credential from the username passed in the request
 -- @param given_password The password as given in the Authorization header
 -- @return Success of authentication
-local function validate_credentials(credential, given_password)
+local function validate_credentials(conf, credential, given_password)
+  if conf.password_hash and #conf.password_hash > 0 then
+    for _, expression in ipairs(conf.password_hash) do
+      local digest = sandbox(expression, sandbox_opts)(credential, given_password)
+      if credential.password == digest then
+        return true
+      end
+    end
+  end
+
   local digest, err = crypto.hash(credential.consumer.id, given_password)
   if err then
     kong.log.err(err)
@@ -194,7 +215,7 @@ local function do_authentication(conf)
     return expired_credential()
   end
 
-  if not validate_credentials(credential, given_password) then
+  if not validate_credentials(conf, credential, given_password) then
     return fail_authentication()
   end
 

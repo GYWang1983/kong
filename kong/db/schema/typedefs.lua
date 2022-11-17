@@ -580,6 +580,15 @@ typedefs.lua_code = Schema.define {
   values = { type = "string", len_min = 1, custom_validator = validate_lua_expression },
 }
 
+typedefs.lua_code_array = Schema.define {
+  type = "array",
+  elements = {
+    type = "string",
+    len_min = 1,
+    custom_validator = validate_lua_expression,
+  }
+}
+
 setmetatable(typedefs, {
   __index = function(_, k)
     error("schema typedef error: definition " .. k .. " does not exist", 2)

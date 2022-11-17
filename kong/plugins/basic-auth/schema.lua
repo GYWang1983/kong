@@ -11,6 +11,7 @@ return {
         fields = {
           { anonymous = { type = "string" }, },
           { hide_credentials = { type = "boolean", required = true, default = false }, },
+          { password_hash = typedefs.lua_code_array },
     }, }, },
   },
 }
