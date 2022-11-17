@@ -27,6 +27,7 @@ local PROXY_AUTHORIZATION = "proxy-authorization"
 local DATE = "date"
 local X_DATE = "x-date"
 local DIGEST = "digest"
+local CREDENTIAL_EXPIRED = "HMAC secret has expired"
 local SIGNATURE_NOT_VALID = "HMAC signature cannot be verified"
 local SIGNATURE_NOT_SAME = "HMAC signature does not match"
 
@@ -56,6 +57,9 @@ local function list_as_set(list)
   return set
 end
 
+local function validate_expire_time(credential)
+  return not credential.expire_at or credential.expire_at <= 0 or credential.expire_at > ngx.time()
+end
 
 local function validate_params(params, conf)
   -- check username and signature are present
@@ -327,10 +331,15 @@ local function do_authentication(conf)
   -- validate signature
   local credential = load_credential(hmac_params.username)
   if not credential then
-    kong.log.debug("failed to retrieve credential for ", hmac_params.username)
+    kong.log.debug("failed to retrieve hmac credential for ", hmac_params.username)
     return false, { status = 401, message = SIGNATURE_NOT_VALID }
   end
 
+  -- credential expired
+  if not validate_expire_time(credential) then
+    kong.log.debug("hmac credential has expired: ", hmac_params.username)
+    return false, { status = 401, message = CREDENTIAL_EXPIRED }
+  end
   hmac_params.secret = credential.secret
 
   if not validate_signature(hmac_params) then
