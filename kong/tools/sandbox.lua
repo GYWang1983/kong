@@ -1,4 +1,5 @@
 local _sandbox = require "kong.tools.kong-lua-sandbox"
+local lrucache = require "resty.lrucache"
 
 local table = table
 local fmt = string.format
@@ -11,7 +12,9 @@ local error = error
 local rawset = rawset
 local assert = assert
 local kong = kong
+local ngx = ngx
 
+local chunk_cache = lrucache.new(1000)
 
 -- deep copy tables using dot notation, like
 -- one: { foo = { bar = { hello = {}, ..., baz = 42 } } }
@@ -120,6 +123,15 @@ local sandbox = function(fn, opts)
   end
 
   opts = opts or {}
+  local cache_key
+  if not opts.disable_cache then
+    local hash = ngx.md5(fn)
+    cache_key = table.concat({ opts.chunk_name or 'default', hash }, ':')
+    local func = chunk_cache:get(cache_key)
+    if func then
+      return func
+    end
+  end
 
   local opts = {
     -- default set load string mode to only 'text chunks'
@@ -132,13 +144,21 @@ local sandbox = function(fn, opts)
     -- sandbox disabled, all arbitrary Lua code can execute unrestricted
     setmetatable(opts.env, { __index = _G})
 
-    return assert(load(fn, opts.chunk_name, opts.mode, opts.env))
+    local func = assert(load(fn, opts.chunk_name, opts.mode, opts.env))
+    if func and cache_key then
+      chunk_cache:set(cache_key, func)
+    end
+    return func
   end
 
   -- set (discard-able) function context
   setmetatable(opts.env, { __index = configuration.environment })
 
-  return _sandbox(fn, opts)
+  local func = _sandbox(fn, opts)
+  if func and cache_key then
+    chunk_cache:set(cache_key, func)
+  end
+  return func
 end
 
 
