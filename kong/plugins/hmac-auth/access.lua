@@ -26,6 +26,7 @@ local AUTHORIZATION = "authorization"
 local PROXY_AUTHORIZATION = "proxy-authorization"
 local DATE = "date"
 local X_DATE = "x-date"
+local TIMESTAMP = "timestamp"
 local DIGEST = "digest"
 local CREDENTIAL_EXPIRED = "HMAC secret has expired"
 local SIGNATURE_NOT_VALID = "HMAC signature cannot be verified"
@@ -208,8 +209,19 @@ local function load_credential(username)
 end
 
 
-local function validate_clock_skew(date_header_name, allowed_clock_skew)
-  local date = kong_request.get_header(date_header_name)
+local function validate_clock_skew(allowed_clock_skew)
+  local header
+  local date = kong_request.get_query_arg(TIMESTAMP)
+  if not date then
+    date = kong_request.get_header(X_DATE)
+    if date then
+      header = X_DATE
+    else
+      date = kong_request.get_header(DATE)
+      header = DATE
+    end
+  end
+
   if not date then
     return false
   end
@@ -224,7 +236,7 @@ local function validate_clock_skew(date_header_name, allowed_clock_skew)
     return false
   end
 
-  return true
+  return true, header
 end
 
 
@@ -299,8 +311,8 @@ local function do_authentication(conf)
   end
 
   -- validate clock skew
-  if not (validate_clock_skew(X_DATE, conf.clock_skew) or
-          validate_clock_skew(DATE, conf.clock_skew)) then
+  local allowed_clock_skew, date_header = validate_clock_skew(conf.clock_skew)
+  if not allowed_clock_skew then
     return false, {
       status = 401,
       message = "HMAC signature cannot be verified, a valid date or " ..
