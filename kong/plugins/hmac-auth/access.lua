@@ -2,7 +2,7 @@ local constants = require "kong.constants"
 local sha256 = require "resty.sha256"
 local openssl_hmac = require "resty.openssl.hmac"
 local utils = require "kong.tools.utils"
-
+local new_tab = require "table.new"
 
 local ngx = ngx
 local kong = kong
@@ -15,8 +15,14 @@ local parse_time = ngx.parse_http_time
 local re_gmatch = ngx.re.gmatch
 local hmac_sha1 = ngx.hmac_sha1
 local ipairs = ipairs
+local pairs = pairs
 local fmt = string.format
 local string_lower = string.lower
+local string_find = string.find
+local string_sub = string.sub
+local insert = table.insert
+local concat = table.concat
+local sort = table.sort
 local kong_request = kong.request
 local kong_client = kong.client
 local kong_service_request = kong.service.request
@@ -28,10 +34,12 @@ local DATE = "date"
 local X_DATE = "x-date"
 local TIMESTAMP = "timestamp"
 local DIGEST = "digest"
+local CONTENT_TYPE = "content-type"
 local CREDENTIAL_EXPIRED = "HMAC secret has expired"
 local SIGNATURE_NOT_VALID = "HMAC signature cannot be verified"
 local SIGNATURE_NOT_SAME = "HMAC signature does not match"
 
+local signature_fields = { "username", "algorithm", "signature_version", "nonce" }
 
 local hmac = {
   ["hmac-sha1"] = function(secret, data)
@@ -48,7 +56,6 @@ local hmac = {
   end,
 }
 
-
 local function list_as_set(list)
   local set = kong.table.new(0, #list)
   for _, v in ipairs(list) do
@@ -64,8 +71,16 @@ end
 
 local function validate_params(params, conf)
   -- check username and signature are present
-  if not params.username or not params.signature then
-    return nil, "username or signature missing"
+  local missing, fields = false, {}
+  for _, name in pairs(conf.auth_fields) do
+    if not params[name] then
+      insert(fields, name)
+      missing = true
+    end
+  end
+
+  if missing then
+    return nil, "required hmac arguments missing: " .. concat(fields, ',')
   end
 
   -- check enforced headers are present
@@ -85,7 +100,7 @@ local function validate_params(params, conf)
     end
   end
 
-  -- check supported alorithm used
+  -- check supported algorithm used
   for _, algo in ipairs(conf.algorithms) do
     if algo == params.algorithm then
       return true
@@ -95,33 +110,120 @@ local function validate_params(params, conf)
   return nil, fmt("algorithm %s not supported", params.algorithm)
 end
 
-
-local function retrieve_hmac_fields(authorization_header)
-  local hmac_params = {}
-
-  -- parse the header to retrieve hamc parameters
+local AUTHORIZATION_HEADER_TEMPLATE = [[\G\s*(?<k>%s)=\"(?<v>[^"]+)\"\s*,?]]
+local function retrieve_hmac_fields_in_header(conf, authorization_header)
+  -- parse the header to retrieve hmac parameters
   if authorization_header then
-    local iterator, iter_err = re_gmatch(authorization_header,
-                                         "\\s*[Hh]mac\\s*username=\"(.+)\"," ..
-                                         "\\s*algorithm=\"(.+)\",\\s*header" ..
-                                         "s=\"(.+)\",\\s*signature=\"(.+)\"",
-                                         "jo")
+    if string_lower(string_sub(authorization_header, 1, 5)) ~= 'hmac ' then
+      return
+    end
+    --local iterator, iter_err = re_gmatch(authorization_header,
+    --                                     "\\s*[Hh]mac\\s*username=\"(.+)\"," ..
+    --                                     "\\s*algorithm=\"(.+)\",\\s*header" ..
+    --                                     "s=\"(.+)\",\\s*signature=\"(.+)\"",
+    --                                     "jo")
+    local fields_conf = conf.auth_fields
+    local field_count = #fields_conf
+    local fields = new_tab(field_count, 0)
+    local rmap = new_tab(0, field_count)
+    for key, name in pairs(fields_conf) do
+      rmap[name] = key
+      insert(fields, name)
+    end
+
+    local regex = fmt(AUTHORIZATION_HEADER_TEMPLATE, concat(fields, '|'))
+    local iterator, iter_err = re_gmatch(string_sub(authorization_header, 6), regex, "jo")
+
     if not iterator then
       kong.log.err(iter_err)
-      return
+      return nil, "unrecognizable hmac authorization header"
     end
 
-    local m, err = iterator()
-    if err then
-      kong.log.err(err)
-      return
+    local params = new_tab(0, field_count)
+    for m in iterator do
+      if m then
+        local name = m['k']
+        params[rmap[name]] = m['v']
+      end
     end
 
-    if m and #m >= 4 then
-      hmac_params.username = m[1]
-      hmac_params.algorithm = m[2]
-      hmac_params.hmac_headers = utils.split(m[3], " ")
-      hmac_params.signature = m[4]
+    if params.hmac_headers then
+      params.hmac_headers = utils.split(params.hmac_headers, " ")
+    end
+
+    kong.log.inspect("retrieve hmac fields from header:", params)
+    return params
+    --if m and #m >= 4 then
+    --  return {
+    --    username = m[1],
+    --    algorithm = m[2],
+    --    hmac_headers = utils.split(m[3], " "),
+    --    signature = m[4],
+    --  }
+    --end
+  end
+
+end
+
+--TODO:
+local function retrieve_hmac_fields_in_query(conf, request_args)
+  -- parse the header to retrieve hmac parameters
+  local fields_conf = conf.auth_fields
+  if request_args[fields_conf.username] then
+    local params = {
+        username = request_args[fields_conf.username],
+        algorithm = request_args[fields_conf.algorithm],
+        hmac_headers = request_args[fields_conf.hmac_headers],
+        signature = request_args[fields_conf.signature],
+        nonce = request_args[fields_conf.nonce],
+    }
+
+    if params.hmac_headers then
+      params.hmac_headers = utils.split(params.hmac_headers, " ")
+    end
+    return params
+  end
+end
+
+local function retrieve_hmac_fields(conf)
+  local hmac_params, err
+  if conf.auth_fields_in_header or not conf.auth_fields_in_query then
+    for _, header_name in ipairs({ PROXY_AUTHORIZATION, AUTHORIZATION }) do
+      local authorization_header = kong_request.get_header(header_name)
+      hmac_params, err = retrieve_hmac_fields_in_header(conf, authorization_header)
+      if hmac_params then
+        hmac_params.in_header = true
+        if conf.hide_credentials then
+          kong_service_request.clear_header(header_name)
+        end
+        break
+      elseif err then
+        return nil, err
+      end
+    end
+  end
+
+  if not hmac_params and conf.auth_fields_in_query then
+    local args = kong_request.get_query()
+    hmac_params = retrieve_hmac_fields_in_query(conf, args)
+    if conf.hide_credentials then
+      for _, name in pairs(conf.auth_fields) do
+        args[name] = nil
+      end
+      kong_service_request.set_query(args)
+    end
+  end
+
+  if hmac_params then
+    local hmac_headers = hmac_params.hmac_headers
+    if not hmac_headers then
+      hmac_params.hmac_headers = conf.enforce_headers or {}
+    end
+    if not hmac_params.signature and #conf.algorithms == 1 then
+      hmac_params.signature = conf.algorithms[1]
+    end
+    if not hmac_params.signature_version and #conf.signature_versions == 1 then
+      hmac_params.signature_version = conf.signature_versions[1]
     end
   end
 
@@ -169,17 +271,71 @@ local function create_hash(request_uri, hmac_params)
   return hmac[hmac_params.algorithm](hmac_params.secret, signing_string)
 end
 
+local function create_hash_v2(hmac_params)
+  local hmac_headers = hmac_params.hmac_headers
+  local request_args = kong_request.get_query(1000)
+  local header_count, args_count = #hmac_headers, #request_args
 
-local function validate_signature(hmac_params)
-  local signature_1 = create_hash(kong_request.get_path_with_query(), hmac_params)
-  local signature_2 = decode_base64(hmac_params.signature)
-  if signature_1 == signature_2 then
-    return true
+  local signing_parts = new_tab(header_count + args_count + 2, 0)
+  local request_line = concat { kong_request.get_method(), " ", kong_request.get_path() }
+  insert(signing_parts, request_line)
+
+  for i = 1, header_count do
+    local header = hmac_headers[i]
+    local header_value = kong.request.get_header(header)
+
+    if not header_value then
+      header = string_lower(header)
+      if type(header_value) == 'table' then
+        for _, hv in ipairs(header_value) do
+          insert(signing_parts, concat { header, ":", hv })
+        end
+      else
+        insert(signing_parts, concat { header, ":", header_value })
+      end
+    end
   end
 
-  -- DEPRECATED BY: https://github.com/Kong/kong/pull/3339
-  local signature_1_deprecated = create_hash(ngx.var.uri, hmac_params)
-  return signature_1_deprecated == signature_2
+  for key, value in pairs(request_args) do
+    if key ~= 'signature' then
+      if type(value) == 'table' then
+        for _, v in ipairs(value) do
+          insert(signing_parts, concat { key, "=", v })
+        end
+      else
+        insert(signing_parts, concat { key, "=", value })
+      end
+    end
+  end
+
+  if hmac_params.in_header then
+    for key in ipairs(signature_fields) do
+      insert(signing_parts, concat { key, "=", hmac_params[key] })
+    end
+  end
+
+  sort(signing_parts)
+  local signing_string = concat(signing_parts, "\n")
+  return hmac[hmac_params.algorithm](hmac_params.secret, signing_string)
+end
+
+local function validate_signature(hmac_params)
+
+  if hmac_params.signature_version == "v2" then
+    local signature_1 = create_hash_v2(hmac_params)
+    local signature_2 = decode_base64(hmac_params.signature)
+    return signature_1 == signature_2
+  else
+    local signature_1 = create_hash(kong_request.get_path_with_query(), hmac_params)
+    local signature_2 = decode_base64(hmac_params.signature)
+    if signature_1 == signature_2 then
+      return true
+    end
+
+    -- DEPRECATED BY: https://github.com/Kong/kong/pull/3339
+    local signature_1_deprecated = create_hash(ngx.var.uri, hmac_params)
+    return signature_1_deprecated == signature_2
+  end
 end
 
 
@@ -302,12 +458,16 @@ end
 
 
 local function do_authentication(conf)
-  local authorization = kong_request.get_header(AUTHORIZATION)
-  local proxy_authorization = kong_request.get_header(PROXY_AUTHORIZATION)
 
-  -- If both headers are missing, return 401
-  if not (authorization or proxy_authorization) then
-    return false, { status = 401, message = "Unauthorized" }
+  -- retrieve hmac parameter from header or query
+  local hmac_params, err = retrieve_hmac_fields(conf)
+  if err then
+    return false, { status = 401, message = err }
+  end
+
+  -- If both headers and request_args are missing, return 401
+  if not hmac_params then
+    return false, { status = 401, message = "Unauthorized" }, true
   end
 
   -- validate clock skew
@@ -320,24 +480,14 @@ local function do_authentication(conf)
     }
   end
 
-  -- retrieve hmac parameter from Proxy-Authorization header
-  local hmac_params = retrieve_hmac_fields(proxy_authorization)
-
-  -- Try with the authorization header
-  if not hmac_params.username then
-    hmac_params = retrieve_hmac_fields(authorization)
-    if hmac_params and conf.hide_credentials then
-      kong_service_request.clear_header(AUTHORIZATION)
-    end
-
-  elseif conf.hide_credentials then
-    kong_service_request.clear_header(PROXY_AUTHORIZATION)
+  if date_header then
+    insert(hmac_params.hmac_headers, date_header)
   end
 
   local ok, err = validate_params(hmac_params, conf)
   if not ok then
     kong.log.debug(err)
-    return false, { status = 401, message = SIGNATURE_NOT_VALID }
+    return false, { status = 401, message = err }
   end
 
   -- validate signature
@@ -354,13 +504,22 @@ local function do_authentication(conf)
   end
   hmac_params.secret = credential.secret
 
-  if not validate_signature(hmac_params) then
-    return false, { status = 401, message = SIGNATURE_NOT_SAME }
+  -- If request body validation is enabled, then verify digest.
+  if conf.validate_request_body then
+    -- ignore file upload body
+    local ct = kong_request.get_header(CONTENT_TYPE)
+    if string_find(ct, "multipart/form-data;", 1, true) == 1 then
+      if not validate_body() then
+        kong.log.debug("digest validation failed")
+        return false, { status = 401, message = SIGNATURE_NOT_SAME }
+      end
+    end
+    if kong_request.get_header(DIGEST) then
+      insert(hmac_params.hmac_headers, DIGEST)
+    end
   end
 
-  -- If request body validation is enabled, then verify digest.
-  if conf.validate_request_body and not validate_body() then
-    kong.log.debug("digest validation failed")
+  if not validate_signature(hmac_params) then
     return false, { status = 401, message = SIGNATURE_NOT_SAME }
   end
 
@@ -390,9 +549,9 @@ function _M.execute(conf)
     return
   end
 
-  local ok, err = do_authentication(conf)
+  local ok, err, continue = do_authentication(conf)
   if not ok then
-    if conf.anonymous then
+    if continue and conf.anonymous then
       -- get anonymous user
       local consumer_cache_key = kong.db.consumers:cache_key(conf.anonymous)
       local consumer, err      = kong.cache:get(consumer_cache_key, nil,
