@@ -4,6 +4,7 @@ local to_hex = require "resty.string".to_hex
 local openssl_hmac = require "resty.openssl.hmac"
 local utils = require "kong.tools.utils"
 local new_tab = require "table.new"
+local clone_tab = require "table.clone"
 
 local ngx = ngx
 local kong = kong
@@ -34,7 +35,7 @@ local PROXY_AUTHORIZATION = "proxy-authorization"
 local DATE = "date"
 local X_DATE = "x-date"
 local TIMESTAMP = "timestamp"
-local DIGEST = "digest"
+local DIGEST = "content-digest"
 local CONTENT_TYPE = "content-type"
 local CREDENTIAL_EXPIRED = "HMAC secret has expired"
 local SIGNATURE_NOT_VALID = "HMAC signature cannot be verified"
@@ -152,16 +153,8 @@ local function retrieve_hmac_fields_in_header(conf, authorization_header)
       params.hmac_headers = utils.split(params.hmac_headers, " ")
     end
 
-    kong.log.inspect("retrieve hmac fields from header:", params)
+    --kong.log.inspect("retrieve hmac fields from header:", params)
     return params
-    --if m and #m >= 4 then
-    --  return {
-    --    username = m[1],
-    --    algorithm = m[2],
-    --    hmac_headers = utils.split(m[3], " "),
-    --    signature = m[4],
-    --  }
-    --end
   end
 
 end
@@ -219,7 +212,7 @@ local function retrieve_hmac_fields(conf)
     hmac_params.use_default = {}
     local hmac_headers = hmac_params.hmac_headers
     if not hmac_headers then
-      hmac_params.hmac_headers = conf.enforce_headers or {}
+      hmac_params.hmac_headers = clone_tab(conf.enforce_headers)
       hmac_params.use_default.hmac_headers = true
     end
     if not hmac_params.algorithm and #conf.algorithms == 1 then
@@ -319,6 +312,7 @@ local function create_hash_v2(conf, hmac_params)
 
   sort(signing_parts)
   local signing_string = concat(signing_parts, "\n")
+  kong.log.debug("signing_string==========", signing_string)
   return hmac[hmac_params.algorithm](hmac_params.secret, signing_string)
 end
 
@@ -326,6 +320,7 @@ local function validate_signature(conf, hmac_params)
 
   if hmac_params.signature_version == "v2" then
     local signature_1 = create_hash_v2(conf, hmac_params)
+    kong.log.debug("signature=", to_hex(signature_1))
     return to_hex(signature_1) == hmac_params.signature
   else
     local signature_1 = create_hash(kong_request.get_path_with_query(), hmac_params)
@@ -408,12 +403,12 @@ local function validate_body()
   local digest_received = kong_request.get_header(DIGEST)
   if not digest_received then
     -- if there is no digest and no body, it is ok
-    return body == ""
+    return body == "" or not body
   end
 
   local digest = sha256:new()
   digest:update(body or '')
-  local digest_created = "SHA-256=" .. encode_base64(digest:final())
+  local digest_created = "SHA-256=" .. to_hex(digest:final())
 
   return digest_created == digest_received
 end
@@ -510,14 +505,14 @@ local function do_authentication(conf)
   if conf.validate_request_body then
     -- ignore file upload body
     local ct = kong_request.get_header(CONTENT_TYPE)
-    if string_find(ct, "multipart/form-data;", 1, true) == 1 then
+    if string_find(ct, "multipart/form-data;", 1, true) ~= 1 then
       if not validate_body() then
         kong.log.debug("digest validation failed")
         return false, { status = 401, message = SIGNATURE_NOT_SAME }
       end
-    end
-    if kong_request.get_header(DIGEST) then
-      insert(hmac_params.hmac_headers, DIGEST)
+      if kong_request.get_header(DIGEST) then
+        insert(hmac_params.hmac_headers, DIGEST)
+      end
     end
   end
 
