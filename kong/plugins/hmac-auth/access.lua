@@ -1,5 +1,6 @@
 local constants = require "kong.constants"
 local sha256 = require "resty.sha256"
+local to_hex = require "resty.string".to_hex
 local openssl_hmac = require "resty.openssl.hmac"
 local utils = require "kong.tools.utils"
 local new_tab = require "table.new"
@@ -325,8 +326,7 @@ local function validate_signature(conf, hmac_params)
 
   if hmac_params.signature_version == "v2" then
     local signature_1 = create_hash_v2(conf, hmac_params)
-    local signature_2 = decode_base64(hmac_params.signature)
-    return signature_1 == signature_2
+    return to_hex(signature_1) == hmac_params.signature
   else
     local signature_1 = create_hash(kong_request.get_path_with_query(), hmac_params)
     local signature_2 = decode_base64(hmac_params.signature)
