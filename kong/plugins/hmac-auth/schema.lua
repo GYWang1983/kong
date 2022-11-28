@@ -8,6 +8,10 @@ local ALGORITHMS = {
   "hmac-sha512",
 }
 
+local SIGNATURE_VERSIONS = {
+  "v1",
+  "v2",
+}
 
 return {
   name = "hmac-auth",
@@ -21,6 +25,19 @@ return {
           { clock_skew = { type = "number", default = 300, gt = 0 }, },
           { anonymous = { type = "string" }, },
           { validate_request_body = { type = "boolean", required = true, default = false }, },
+          { auth_fields_in_header = { type = "boolean", default = true }, },
+          { auth_fields_in_query = { type = "boolean", default = false }, },
+          { auth_fields = {
+            type = "record",
+            fields = {
+              { username  = { type = "string", default = "username" } },
+              { algorithm = { type = "string", default = "algorithm" } },
+              { hmac_headers = { type = "string", default = "headers" } },
+              { nonce     = { type = "string", default = "nonce" } },
+              { signature = { type = "string", default = "signature" } },
+              { signature_version = { type = "string", default = "signature_version" } },
+            }
+          }, },
           { enforce_headers = {
               type = "array",
               elements = { type = "string" },
@@ -30,6 +47,11 @@ return {
               type = "array",
               elements = { type = "string", one_of = ALGORITHMS },
               default = ALGORITHMS,
+          }, },
+          { signature_versions = {
+            type = "array",
+            elements = { type = "string", one_of = SIGNATURE_VERSIONS },
+            default = SIGNATURE_VERSIONS,
           }, },
         },
       },
