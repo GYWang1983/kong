@@ -72,7 +72,7 @@ end
 local function validate_params(params, conf)
   -- check username and signature are present
   local missing, fields = false, {}
-  for _, name in pairs(conf.auth_fields) do
+  for name in pairs(conf.auth_fields) do
     if not params[name] then
       insert(fields, name)
       missing = true
@@ -215,15 +215,19 @@ local function retrieve_hmac_fields(conf)
   end
 
   if hmac_params then
+    hmac_params.use_default = {}
     local hmac_headers = hmac_params.hmac_headers
     if not hmac_headers then
       hmac_params.hmac_headers = conf.enforce_headers or {}
+      hmac_params.use_default.hmac_headers = true
     end
-    if not hmac_params.signature and #conf.algorithms == 1 then
-      hmac_params.signature = conf.algorithms[1]
+    if not hmac_params.algorithm and #conf.algorithms == 1 then
+      hmac_params.algorithm = conf.algorithms[1]
+      hmac_params.use_default.algorithm = true
     end
     if not hmac_params.signature_version and #conf.signature_versions == 1 then
       hmac_params.signature_version = conf.signature_versions[1]
+      hmac_params.use_default.signature_version = true
     end
   end
 
@@ -271,7 +275,7 @@ local function create_hash(request_uri, hmac_params)
   return hmac[hmac_params.algorithm](hmac_params.secret, signing_string)
 end
 
-local function create_hash_v2(hmac_params)
+local function create_hash_v2(conf, hmac_params)
   local hmac_headers = hmac_params.hmac_headers
   local request_args = kong_request.get_query(1000)
   local header_count, args_count = #hmac_headers, #request_args
@@ -281,18 +285,14 @@ local function create_hash_v2(hmac_params)
   insert(signing_parts, request_line)
 
   for i = 1, header_count do
-    local header = hmac_headers[i]
+    local header = string_lower(hmac_headers[i])
     local header_value = kong.request.get_header(header)
-
-    if not header_value then
-      header = string_lower(header)
-      if type(header_value) == 'table' then
-        for _, hv in ipairs(header_value) do
-          insert(signing_parts, concat { header, ":", hv })
-        end
-      else
-        insert(signing_parts, concat { header, ":", header_value })
+    if type(header_value) == 'table' then
+      for _, hv in ipairs(header_value) do
+        insert(signing_parts, concat { header, ":", hv })
       end
+    elseif header_value then
+      insert(signing_parts, concat { header, ":", header_value })
     end
   end
 
@@ -309,8 +309,10 @@ local function create_hash_v2(hmac_params)
   end
 
   if hmac_params.in_header then
-    for key in ipairs(signature_fields) do
-      insert(signing_parts, concat { key, "=", hmac_params[key] })
+    for _, key in ipairs(signature_fields) do
+      if not hmac_params.use_default[key] then
+        insert(signing_parts, concat { conf.auth_fields[key], "=", hmac_params[key] })
+      end
     end
   end
 
@@ -319,10 +321,10 @@ local function create_hash_v2(hmac_params)
   return hmac[hmac_params.algorithm](hmac_params.secret, signing_string)
 end
 
-local function validate_signature(hmac_params)
+local function validate_signature(conf, hmac_params)
 
   if hmac_params.signature_version == "v2" then
-    local signature_1 = create_hash_v2(hmac_params)
+    local signature_1 = create_hash_v2(conf, hmac_params)
     local signature_2 = decode_base64(hmac_params.signature)
     return signature_1 == signature_2
   else
@@ -476,7 +478,7 @@ local function do_authentication(conf)
     return false, {
       status = 401,
       message = "HMAC signature cannot be verified, a valid date or " ..
-                "x-date header is required for HMAC Authentication"
+                "x-date header or timestamp query argument is required for HMAC Authentication"
     }
   end
 
@@ -519,7 +521,7 @@ local function do_authentication(conf)
     end
   end
 
-  if not validate_signature(hmac_params) then
+  if not validate_signature(conf, hmac_params) then
     return false, { status = 401, message = SIGNATURE_NOT_SAME }
   end
 
