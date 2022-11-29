@@ -43,13 +43,13 @@ local function retrieve_credentials(header_name, conf)
     local iterator, iter_err = re_gmatch(authorization_header, "\\s*[Bb]asic\\s*(.+)")
     if not iterator then
       kong.log.err(iter_err)
-      return
+      return false
     end
 
     local m, err = iterator()
     if err then
       kong.log.err(err)
-      return
+      return false
     end
 
     if m and m[1] then
@@ -58,12 +58,12 @@ local function retrieve_credentials(header_name, conf)
         local basic_parts, err = re_match(decoded_basic, "([^:]+):(.*)", "oj")
         if err then
           kong.log.err(err)
-          return
+          return true
         end
 
         if not basic_parts then
           kong.log.err("header has unrecognized format")
-          return
+          return true
         end
 
         username = basic_parts[1]
@@ -76,7 +76,7 @@ local function retrieve_credentials(header_name, conf)
     kong.service.request.clear_header(header_name)
   end
 
-  return username, password
+  return true, username, password
 end
 
 
@@ -194,17 +194,21 @@ local function do_authentication(conf)
   end
 
   local credential
-  local given_username, given_password = retrieve_credentials("proxy-authorization", conf)
+  local found, given_username, given_password = retrieve_credentials("proxy-authorization", conf)
   if given_username and given_password then
     credential = load_credential_from_db(given_username)
   end
 
   -- Try with the authorization header
-  if not credential then
-    given_username, given_password = retrieve_credentials("authorization", conf)
+  if not found then
+    found, given_username, given_password = retrieve_credentials("authorization", conf)
     if given_username and given_password then
       credential = load_credential_from_db(given_username)
     end
+  end
+
+  if not found then
+    return true
   end
 
   if not credential then
