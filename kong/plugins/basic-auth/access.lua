@@ -38,38 +38,41 @@ local _M = {}
 local function retrieve_credentials(header_name, conf)
   local username, password
   local authorization_header = kong.request.get_header(header_name)
+  if not authorization_header then
+    return false
+  end
 
-  if authorization_header then
-    local iterator, iter_err = re_gmatch(authorization_header, "\\s*[Bb]asic\\s*(.+)")
-    if not iterator then
-      kong.log.err(iter_err)
-      return false
-    end
+  local iterator, iter_err = re_gmatch(authorization_header, "\\s*[Bb]asic\\s+(.+)")
+  if not iterator then
+    kong.log.err(iter_err)
+    return false
+  end
 
-    local m, err = iterator()
+  local m, err = iterator()
+  if err then
+    kong.log.err(err)
+    return false
+  end
+
+  if not m or not m[1] then
+    return false
+  end
+
+  local decoded_basic = decode_base64(m[1])
+  if decoded_basic then
+    local basic_parts, err = re_match(decoded_basic, "([^:]+):(.*)", "oj")
     if err then
       kong.log.err(err)
-      return false
+      return true
     end
 
-    if m and m[1] then
-      local decoded_basic = decode_base64(m[1])
-      if decoded_basic then
-        local basic_parts, err = re_match(decoded_basic, "([^:]+):(.*)", "oj")
-        if err then
-          kong.log.err(err)
-          return true
-        end
-
-        if not basic_parts then
-          kong.log.err("header has unrecognized format")
-          return true
-        end
-
-        username = basic_parts[1]
-        password = basic_parts[2]
-      end
+    if not basic_parts then
+      kong.log.err("header has unrecognized format")
+      return true
     end
+
+    username = basic_parts[1]
+    password = basic_parts[2]
   end
 
   if conf.hide_credentials then
