@@ -361,22 +361,24 @@ end
 
 local function validate_clock_skew(allowed_clock_skew)
   local header
-  local date = kong_request.get_query_arg(TIMESTAMP)
-  if not date then
-    date = kong_request.get_header(X_DATE)
+  local date = kong_request.get_header(X_DATE)
+  if date then
+    header = X_DATE
+  else
+    date = kong_request.get_header(DATE)
+    header = DATE
+  end
+
+  local requestTime
+  if date then
+    requestTime = parse_time(date)
+  else
+    date = kong_request.get_query_arg(TIMESTAMP)
     if date then
-      header = X_DATE
-    else
-      date = kong_request.get_header(DATE)
-      header = DATE
+      requestTime = tonumber(date)
     end
   end
 
-  if not date then
-    return false
-  end
-
-  local requestTime = parse_time(date)
   if not requestTime then
     return false
   end
