@@ -186,7 +186,6 @@ local function retrieve_hmac_fields(conf)
       local authorization_header = kong_request.get_header(header_name)
       hmac_params, err = retrieve_hmac_fields_in_header(conf, authorization_header)
       if hmac_params then
-        hmac_params.in_header = true
         if conf.hide_credentials then
           kong_service_request.clear_header(header_name)
         end
@@ -302,11 +301,9 @@ local function create_hash_v2(conf, hmac_params)
     end
   end
 
-  if hmac_params.in_header then
-    for _, key in ipairs(signature_fields) do
-      if not hmac_params.use_default[key] then
-        insert(signing_parts, concat { conf.auth_fields[key], "=", hmac_params[key] })
-      end
+  for _, key in ipairs(signature_fields) do
+    if not hmac_params.use_default[key] then
+      insert(signing_parts, concat { conf.auth_fields[key], "=", hmac_params[key] })
     end
   end
 
@@ -364,22 +361,24 @@ end
 
 local function validate_clock_skew(allowed_clock_skew)
   local header
-  local date = kong_request.get_query_arg(TIMESTAMP)
-  if not date then
-    date = kong_request.get_header(X_DATE)
+  local date = kong_request.get_header(X_DATE)
+  if date then
+    header = X_DATE
+  else
+    date = kong_request.get_header(DATE)
+    header = DATE
+  end
+
+  local requestTime
+  if date then
+    requestTime = parse_time(date)
+  else
+    date = kong_request.get_query_arg(TIMESTAMP)
     if date then
-      header = X_DATE
-    else
-      date = kong_request.get_header(DATE)
-      header = DATE
+      requestTime = tonumber(date)
     end
   end
 
-  if not date then
-    return false
-  end
-
-  local requestTime = parse_time(date)
   if not requestTime then
     return false
   end
