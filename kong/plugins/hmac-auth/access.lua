@@ -393,7 +393,7 @@ local function validate_clock_skew(allowed_clock_skew)
 end
 
 
-local function validate_body()
+local function validate_body(hmac_params)
   local body, err = kong_request.get_raw_body()
   if err then
     kong.log.debug(err)
@@ -408,7 +408,12 @@ local function validate_body()
 
   local digest = sha256:new()
   digest:update(body or '')
-  local digest_created = "SHA-256=" .. to_hex(digest:final())
+  local digest_created = "SHA-256="
+  if hmac_params.signature_version == "v2" then
+    digest_created = digest_created .. to_hex(digest:final())
+  else
+    digest_created = digest_created .. encode_base64(digest:final())
+  end
 
   return digest_created == digest_received
 end
@@ -505,8 +510,8 @@ local function do_authentication(conf)
   if conf.validate_request_body then
     -- ignore file upload body
     local ct = kong_request.get_header(CONTENT_TYPE)
-    if string_find(ct, "multipart/form-data;", 1, true) ~= 1 then
-      if not validate_body() then
+    if ct and string_find(ct, "multipart/form-data;", 1, true) ~= 1 then
+      if not validate_body(hmac_params) then
         kong.log.debug("digest validation failed")
         return false, { status = 401, message = SIGNATURE_NOT_SAME }
       end
